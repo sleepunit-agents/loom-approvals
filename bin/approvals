@@ -95,6 +95,23 @@ def iso(t):
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Kinds only a piece on loom's machine files, for the body it acts for (--as): never a body over the API, so a body
+# can't put its own words on a card the owner reads as the piece's.
+PIECE_KINDS = {"local-wake"}
+
+
+def exact_target(target):
+    """A target is approved and spent as exactly the text the owner read, compared raw. It is an identifier (a repo, a
+    wake's agent:hash, a relay's agent->agent), so it is printable ASCII, single spaces between words: nothing that
+    could look like another target on the card (no homoglyphs, combining marks, control or invisible characters).
+    loom draws a card's text as text, never markup, so `<` and `>` are fine."""
+    t = str(target or "")
+    if len(t) > TARGET_MAX or not re.fullmatch(r"[\x21-\x7e]+( [\x21-\x7e]+)*", t):
+        raise ValueError(f"--target is printable ASCII, at most {TARGET_MAX} characters, single spaces between words: "
+                         "it's matched exactly as shown")
+    return t
+
+
 def plain(text, n):
     """One line with nothing that reads as markup or a second line: a body's words, as words."""
     t = unicodedata.normalize("NFKC", str(text or ""))
@@ -105,10 +122,11 @@ def plain(text, n):
 class Store:
     def __init__(self):
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(STATE, 0o700)  # mkdir's mode only applies to a directory it makes
         self.path, self.audit = STATE / "approvals.json", STATE / "audit.jsonl"
 
     def __enter__(self):
-        self.lock = open(STATE / "approvals.lock", "w")
+        self.lock = os.fdopen(os.open(STATE / "approvals.lock", os.O_CREAT | os.O_WRONLY, 0o600), "w")
         fcntl.flock(self.lock, fcntl.LOCK_EX)
         try:
             self.d = json.loads(self.path.read_text())
@@ -120,12 +138,12 @@ class Store:
         rows = sorted(self.d["approvals"].values(), key=lambda a: a["at"], reverse=True)
         self.d["approvals"] = {a["id"]: a for a in rows[:KEEP]}
         tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(self.d, indent=1) + "\n")
-        os.chmod(tmp, 0o600)
+        with os.fdopen(os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
+            f.write(json.dumps(self.d, indent=1) + "\n")
         tmp.replace(self.path)
 
     def log(self, event, a, **extra):
-        with open(self.audit, "a") as f:
+        with os.fdopen(os.open(self.audit, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600), "a") as f:
             f.write(json.dumps({"at": iso(now()), "event": event, "id": a["id"], "kind": a["kind"],
                                 "target": a["target"], "who": a["who"], **extra}) + "\n")
 
@@ -162,16 +180,18 @@ def spender(who):
     return (who.get("agent"), place, m.group(1) if m else None)
 
 
-def request(caller, kind, target, what, why, minutes=None):
+def request(caller, kind, target, what, why, minutes=None, acting_for=False):
     who = who_of(caller)
     if not KIND.match(kind or ""):
         raise ValueError("--kind is the wall it hit, like github-write or relay")
+    if kind in PIECE_KINDS and not acting_for:
+        raise PermissionError(f"a {kind} approval is filed by the piece on loom's machine for its body (--as), not by a body")
+    target = exact_target(target)
     # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
     # are refused, never cut, so nothing can hide past the part the owner reads.
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
         if len(plain(text, 10**6)) > n:
             raise ValueError(f"{label} is {n} characters at most as shown on the card; say it shorter")
-    target = plain(target, TARGET_MAX)
     what, why = plain(what, WORDS_MAX), plain(why, WORDS_MAX)
     if not target or not what or not why:
         raise ValueError("say exactly what (--target), the action (--what) and why (--why): the owner reads them to decide")
@@ -200,7 +220,7 @@ def get(aid):
 def use(caller, aid, kind, target):
     """Spend an allowed approval for exactly the action it allowed. True once."""
     who = who_of(caller)
-    target = plain(target, TARGET_MAX)
+    target = exact_target(target)
     with Store() as s:
         a = s.d["approvals"].get(aid)
         if not a:
@@ -293,7 +313,8 @@ def meta_of(a):
     """What it is, where it was asked from, and why: "A wake on loom's machine · from Ada's chat house (or a
     later one) · “…”". A target that's only a key for loom (a wake's agent:hash) is left out; a real one (a repo) stays."""
     kind = KIND_WORDS.get(a["kind"], a["kind"].replace("-", " ").capitalize())
-    target = a["target"] if not re.fullmatch(r"[a-z][a-z0-9-]*:[0-9a-f]{8,}", a["target"] or "") else None
+    # Only a wake's target is an internal key (agent:hash); every other kind's target is shown, whatever it looks like.
+    target = None if a["kind"] == "local-wake" and re.fullmatch(r"[a-z][a-z0-9-]*:[0-9a-f]{8,}", a["target"] or "") else a["target"]
     later = " (or a later one)" if spender(a["who"])[1] == "house" else ""
     return " · ".join(x for x in (kind + (f": {target}" if target else ""), f"from {place_of(a['who'])}{later}", f"“{a['why']}”") if x)
 
@@ -397,7 +418,8 @@ def run(argv, caller=None):
         except ValueError:
             raise ValueError("--as is the caller's JSON") from None
     if a.cmd == "request":
-        x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None)
+        x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None,
+                    acting_for=bool(a.as_))
         if x["state"] == "allowed":
             return f"{x['id']}: already allowed (until {x['expires']}); use it: approvals use {x['id']} --kind {x['kind']} --target '{x['target']}'\n"
         return f"{x['id']}: asked the owner (a card on loom's Home); check it: approvals check {x['id']}\n"

@@ -140,6 +140,32 @@ class Approvals(unittest.TestCase):
             aid = ap.run(["request", "--kind", "relay", "--target", "zed->ada", "--what", "w", "--why", "y"]).split(":")[0]
         self.assertEqual(ap.get(aid)["who"], {"agent": "zed", "where": "loom's machine"})
 
+    def test_a_target_is_matched_exactly_as_shown(self):
+        # A target is printable ASCII and compared raw: two raw targets never meet as one, and none looks like another.
+        refused = lambda argv: self.assertNotEqual(self.api(argv)["body"]["exit"], 0, argv)
+        for t in ("a\tb", " padded", "two  spaces", "ｆｕｌｌwidth", "zero\u200bwidth", "acme/\u0430pp", "cafe\u0301"):
+            refused(["request", "--kind", "github-write", "--target", t, "--what", "w", "--why", "y"])
+        aid = self.ask(target="acme/app")
+        ap.answer(aid, "allow", "pat-owner")
+        refused(["use", aid, "--kind", "github-write", "--target", "acme/app "])
+        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app"])["body"]["exit"], 0)
+
+    def test_only_a_piece_files_a_wake_approval(self):
+        # A body can't file a local-wake card itself (its words would stand in for the piece's).
+        r = self.api(["request", "--kind", "local-wake", "--target", "ada:abcdef12", "--what", "w", "--why", "y"])
+        self.assertNotEqual(r["body"]["exit"], 0)
+
+    def test_the_card_hides_only_a_wakes_internal_key(self):
+        a = {"kind": "github-write", "target": "acme:deadbeef00", "who": HOUSE, "why": "y"}
+        self.assertIn("acme:deadbeef00", ap.meta_of(a))
+        self.assertNotIn("ada:deadbeef00", ap.meta_of({**a, "kind": "local-wake", "target": "ada:deadbeef00"}))
+
+    def test_state_files_are_private(self):
+        self.ask()
+        for f in ("approvals.json", "audit.jsonl", "approvals.lock"):
+            self.assertEqual(os.stat(ap.STATE / f).st_mode & 0o777, 0o600, f)
+        self.assertEqual(os.stat(ap.STATE).st_mode & 0o777, 0o700)
+
     def test_words_that_dont_fit_on_the_card_are_refused_not_cut(self):
         # Fullwidth letters normalize (NFKC) to more than they look, and a long tail could hide.
         for what in ("x" * 301, "ﾟ" * 200 + "x" * 150):
