@@ -1,0 +1,43 @@
+{
+  "name": "loom-approvals",
+  "version": "0.1.0",
+  "private": true,
+  "description": "loom's approvals piece: a body that hits a permission wall asks, the owner allows it once on loom's page, and the approval is spent by exactly the action it names",
+  "bin": {
+    "loom-approvals": "bin/approvals",
+    "approvals": "bin/approvals"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "python3 test/test_approvals.py && sh test/smoke.sh"
+  },
+  "license": "AGPL-3.0-or-later",
+  "loom": {
+    "name": "approvals",
+    "role": "approvals",
+    "label": "Approvals",
+    "description": "Single-use approvals: a body asks for one action, the owner allows or denies it on loom's Home, and it's spent once by exactly that action.",
+    "settings": [
+      {
+        "name": "APPROVALS_DIR",
+        "label": "Where approvals are kept",
+        "hint": "a directory; approvals.json and its audit log live there",
+        "default": "${LOOM_PIECE_HOME}/data"
+      },
+      {
+        "name": "APPROVALS_LOCAL_AGENT",
+        "label": "The agent a request from this machine is from",
+        "hint": "an agent's id; a request made on loom's machine itself (not from a house) is filed as this agent's"
+      },
+      {
+        "name": "APPROVALS_KINDS",
+        "label": "Words for kinds of approval",
+        "hint": "JSON, like {\"github-write\": \"A GitHub write\"}; a kind not named is shown as its own words"
+      }
+    ]
+  }
+}

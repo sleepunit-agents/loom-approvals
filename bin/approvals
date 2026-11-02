@@ -1,0 +1,492 @@
+#!/usr/bin/env python3
+"""approvals: an agent's body hits a permission wall and asks; the owner says yes or no on loom's page.
+
+    approvals request --kind KIND --target TARGET --what "…" --why "…" [--minutes N]
+    approvals check ID          pending | allowed | denied | used | expired
+    approvals use ID --kind KIND --target TARGET
+                                spend an allowed approval: once, for exactly that kind and target
+    approvals list              the recent ones (the owner's view, on loom's machine)
+
+loom's approvals piece (loom-approvals): bodies create and check requests and spend
+an allowed one; they never approve. Only the owner does, with Allow or Deny on loom's
+Home (a card under "Your call"). An approval is a single-use receipt for one action:
+KIND (what wall: a GitHub write guard, a relay, …) and TARGET (exactly what it's for:
+owner/repo:account, alpha->beta, …). It's spent by the call it allowed, and lasts
+MINUTES (60, 8 h at most) once allowed.
+
+The words a body gives (--what, --why) are its own: shown to the owner, never what
+decides. A body may be steered, so nothing here grants by itself.
+
+loom's piece verbs: `ui --json`, `ui page --json`, `ui act --json`, `api --json`.
+Over the piece API (a house, any box) the caller is loom's; run here, it's loom's machine.
+
+Settings (environment; a managed piece gets them from loom):
+  APPROVALS_DIR          where the store lives (default: <piece home>/data, else
+                         ~/.local/state/loom-approvals)
+  APPROVALS_LOCAL_AGENT  the agent a request made on loom's machine itself is from
+                         (default: agent)
+  APPROVALS_KINDS        extra words for kinds, as JSON: {"github-write": "A GitHub write"}
+"""
+import argparse
+import fcntl
+import json
+import os
+import re
+import secrets
+import sys
+import unicodedata
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def piece_home():
+    """This piece's home under loom (`$LOOM_HOME/pieces/approvals`): loom says so when it runs us
+    (LOOM_PIECE_HOME); run directly, by the bin loom linked, it's found from where this file lives."""
+    h = os.environ.get("LOOM_PIECE_HOME")
+    if h:
+        return Path(h)
+    here = Path(__file__).resolve().parent
+    for d in [here, *here.parents][:8]:
+        if (d / "piece.json").is_file() and (d / "versions").is_dir():
+            return d
+    return None
+
+
+PIECE_HOME = piece_home()
+
+
+def _owner_settings():
+    try:
+        d = json.loads((PIECE_HOME / "settings.json").read_text()) if PIECE_HOME else {}
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_SETTINGS = _owner_settings()
+
+
+def setting(name, default=""):
+    """A setting: the environment (loom puts the owner's settings there), else the owner's
+    settings.json in the piece home (a direct run), else the default."""
+    v = os.environ.get(name)
+    if v in (None, ""):
+        v = _SETTINGS.get(name)
+    return v if isinstance(v, str) and v != "" else default
+
+
+STATE = Path(setting("APPROVALS_DIR") or
+             (PIECE_HOME / "data" if PIECE_HOME else Path.home() / ".local" / "state" / "loom-approvals")).expanduser()
+LOCAL_AGENT = setting("APPROVALS_LOCAL_AGENT", "agent")
+KIND = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+ID = re.compile(r"^a-[0-9a-f]{8}$")
+TARGET_MAX, WORDS_MAX = 200, 300
+DEFAULT_MIN, MAX_MIN = 60, 8 * 60
+KEEP = 300
+
+
+def now():
+    return datetime.now(timezone.utc)
+
+
+def iso(t):
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def plain(text, n):
+    """One line with nothing that reads as markup or a second line: a body's words, as words."""
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    t = "".join(" " if unicodedata.category(c)[0] in "CZ" or c in "<>[]{}" else c for c in t)
+    return re.sub(r" +", " ", t).strip()[:n]
+
+
+class Store:
+    def __init__(self):
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.path, self.audit = STATE / "approvals.json", STATE / "audit.jsonl"
+
+    def __enter__(self):
+        self.lock = open(STATE / "approvals.lock", "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            self.d = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            self.d = {"v": 1, "approvals": {}}
+        return self
+
+    def save(self):
+        rows = sorted(self.d["approvals"].values(), key=lambda a: a["at"], reverse=True)
+        self.d["approvals"] = {a["id"]: a for a in rows[:KEEP]}
+        tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(self.d, indent=1) + "\n")
+        os.chmod(tmp, 0o600)
+        tmp.replace(self.path)
+
+    def log(self, event, a, **extra):
+        with open(self.audit, "a") as f:
+            f.write(json.dumps({"at": iso(now()), "event": event, "id": a["id"], "kind": a["kind"],
+                                "target": a["target"], "who": a["who"], **extra}) + "\n")
+
+    def __exit__(self, *exc):
+        self.lock.close()
+
+
+def state_of(a, t=None):
+    t = t or now()
+    if a["state"] == "allowed" and a.get("expires") and datetime.strptime(a["expires"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) <= t:
+        return "expired"
+    return a["state"]
+
+
+def who_of(caller):
+    """Who's asking: a house (agent and house), another agent's body, or loom's machine itself."""
+    if not caller:
+        return {"agent": LOCAL_AGENT, "where": "loom's machine"}
+    if caller.get("kind") == "agent" and isinstance(caller.get("agent"), str):
+        where = caller.get("house") or "a body"
+        if caller.get("service"):
+            where = f"{where} ({caller['service']})"
+        return {"agent": caller["agent"], "where": where}
+    raise PermissionError("only an agent's bodies ask (the owner answers on the page)")
+
+
+def spender(who):
+    """What has to match to spend an approval: the agent, the kind of place it asked from
+    (a house, loom's machine, or a body outside a house), and its service if a service
+    asked. Only which house is relaxed: houses are short-lived, so a later one may spend it."""
+    where = who.get("where", "")
+    m = re.search(r"\(([^()]*)\)$", where)
+    place = "house" if re.match(r"h-[0-9]+\b", where) else "local" if where == "loom's machine" else "body"
+    return (who.get("agent"), place, m.group(1) if m else None)
+
+
+def request(caller, kind, target, what, why, minutes=None):
+    who = who_of(caller)
+    if not KIND.match(kind or ""):
+        raise ValueError("--kind is the wall it hit, like github-write or relay")
+    # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
+    # are refused, never cut, so nothing can hide past the part the owner reads.
+    for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
+        if len(plain(text, 10**6)) > n:
+            raise ValueError(f"{label} is {n} characters at most as shown on the card; say it shorter")
+    target = plain(target, TARGET_MAX)
+    what, why = plain(what, WORDS_MAX), plain(why, WORDS_MAX)
+    if not target or not what or not why:
+        raise ValueError("say exactly what (--target), the action (--what) and why (--why): the owner reads them to decide")
+    mins = DEFAULT_MIN if not minutes else max(1, min(int(minutes), MAX_MIN))
+    with Store() as s:
+        # Asking again for the same thing is the same card.
+        for a in s.d["approvals"].values():
+            if a["kind"] == kind and a["target"] == target and a["who"] == who and state_of(a) in ("pending", "allowed"):
+                return a
+        a = {"id": "a-" + secrets.token_hex(4), "kind": kind, "target": target, "what": what, "why": why,
+             "who": who, "minutes": mins, "at": iso(now()), "state": "pending"}
+        s.d["approvals"][a["id"]] = a
+        s.save()
+        s.log("request", a, what=what, why=why)
+        return a
+
+
+def get(aid):
+    with Store() as s:
+        a = s.d["approvals"].get(aid)
+        if not a:
+            raise LookupError(f"no approval {aid}")
+        return {**a, "state": state_of(a)}
+
+
+def use(caller, aid, kind, target):
+    """Spend an allowed approval for exactly the action it allowed. True once."""
+    who = who_of(caller)
+    target = plain(target, TARGET_MAX)
+    with Store() as s:
+        a = s.d["approvals"].get(aid)
+        if not a:
+            raise LookupError(f"no approval {aid}")
+        st = state_of(a)
+        if st != "allowed":
+            raise PermissionError(f"{aid} is {st}" + (", waiting on the owner" if st == "pending" else ""))
+        if a["kind"] != kind or a["target"] != target:
+            s.log("refused-use", a, kind_used=kind, target_used=target)
+            raise PermissionError(f"{aid} allows {a['kind']} for {a['target']}, not {kind} for {target}")
+        # The agent that asked spends it, from any of its houses: the house that asked is
+        # usually gone by the time the owner answers, hours later, and the agent's next house
+        # is the one that carries on. The action itself is pinned by kind and target.
+        if spender(a["who"]) != spender(who):
+            s.log("refused-use", a, who_used=who)
+            raise PermissionError(f"{aid} was asked by {a['who']['agent']} in {a['who']['where']}, not by {who['agent']} in {who['where']}")
+        a["state"], a["used"] = "used", iso(now())
+        s.save()
+        s.log("use", a)
+        return a
+
+
+def answer(aid, action, by=None):
+    """by: the household member who answered (loom's caller, loom docs/specs/owners.md), when loom says."""
+    with Store() as s:
+        a = s.d["approvals"].get(aid)
+        if not a:
+            raise LookupError("no such approval")
+        if state_of(a) != "pending":
+            raise PermissionError(f"it's already {state_of(a)}")
+        t = now()
+        a["state"] = "allowed" if action == "allow" else "denied"
+        a["decided"] = iso(t)
+        if by:
+            a["by"] = by
+        if action == "allow":
+            a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + a["minutes"] * 60, timezone.utc))
+        s.save()
+        s.log(action, a)
+        return a
+
+
+def recent():
+    with Store() as s:
+        return sorted(({**a, "state": state_of(a)} for a in s.d["approvals"].values()), key=lambda a: a["at"], reverse=True)
+
+
+# ---------------------------------------------------------------- loom's page
+
+OUTCOME = {"allowed": "Allowed, not used yet.", "used": "Allowed, and used.", "denied": "Denied.", "expired": "Allowed, but it expired unused."}
+
+# The page says what an approval is for in plain words, not ids.
+STATE_WORDS = {"pending": "Waiting on you", "allowed": "Allowed", "used": "Used", "denied": "Denied", "expired": "Expired"}
+# The kinds the clock piece files, plus any the instance names (APPROVALS_KINDS).
+KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent"}
+try:
+    _extra = json.loads(setting("APPROVALS_KINDS", "{}"))
+    KIND_WORDS.update({k: v for k, v in _extra.items() if KIND.match(str(k)) and isinstance(v, str)} if isinstance(_extra, dict) else {})
+except ValueError:
+    pass
+
+
+def name_of(agent):
+    return agent[:1].upper() + agent[1:] if agent else "An agent"
+
+
+def what_of(a):
+    """What it asks for. A wake on loom's machine was filed as "run on loom's machine: …"; the card's meta already says
+    that ("A wake on loom's machine"), so the row says only what the wake would do."""
+    what = a.get("what", "")
+    head = "run on loom's machine: "
+    if a.get("kind") == "local-wake" and what.startswith(head):
+        what = what[len(head):]
+        if not re.match(r"[a-z]-\d", what):   # an id that leads stays as it's written (a task's, say)
+            what = what[:1].upper() + what[1:]
+    return what
+
+
+def place_of(who):
+    """Where it asked from, in words: "Ada's chat house", "loom's machine", "a body"."""
+    where = who.get("where", "")
+    m = re.search(r"\(([^()]*)\)$", where)
+    service = m.group(1).replace("-", " ").capitalize() if m else None
+    if re.match(r"h-[0-9]+\b", where):
+        return f"{name_of(who.get('agent'))}'s {service.lower() if service else ''} house".replace("  ", " ")
+    return where or "an agent's body"
+
+
+def meta_of(a):
+    """What it is, where it was asked from, and why: "A wake on loom's machine · from Ada's chat house (or a
+    later one) · “…”". A target that's only a key for loom (a wake's agent:hash) is left out; a real one (a repo) stays."""
+    kind = KIND_WORDS.get(a["kind"], a["kind"].replace("-", " ").capitalize())
+    target = a["target"] if not re.fullmatch(r"[a-z][a-z0-9-]*:[0-9a-f]{8,}", a["target"] or "") else None
+    later = " (or a later one)" if spender(a["who"])[1] == "house" else ""
+    return " · ".join(x for x in (kind + (f": {target}" if target else ""), f"from {place_of(a['who'])}{later}", f"“{a['why']}”") if x)
+
+
+def ui_manifest():
+    rows = recent()
+    pending = [a for a in rows if a["state"] == "pending"][:10]
+    # loom's Inbox: what's waiting is a permission; what was answered is its history (Answered).
+    done = [a for a in rows if a["state"] in OUTCOME][:20]
+    return {"v": 2, "asks": [{
+        "text": f"{name_of(a['who']['agent'])} asks: {what_of(a)}",
+        "meta": meta_of(a),
+        "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
+        "actions": [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}},
+                    {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}],
+    } for a in pending], "answered": [{
+        "text": f"{name_of(a['who']['agent'])} asked: {what_of(a)}"[:300],
+        "outcome": OUTCOME[a["state"]] + (f" ({'Allowed' if a['state'] != 'denied' else 'Denied'} by {a['by']}.)" if a.get("by") else ""),
+        "at": a.get("used") or a.get("decided") or a["at"], "kind": "permission", "agent": a["who"]["agent"], "page": "",
+    } for a in done]}
+
+
+def ui_page(req):
+    if (req or {}).get("path", "") != "":
+        return {"title": "Not found", "sections": []}
+    rows = recent()[:30]
+    tone = {"pending": "warn", "allowed": "ok", "used": "ok", "denied": "bad"}
+    items = [{"text": f"{name_of(a['who']['agent'])} · {what_of(a)}", "tone": tone.get(a["state"]),
+              "meta": f"{STATE_WORDS.get(a['state'], a['state'].capitalize())} · {meta_of(a)}"} for a in rows]
+    return {"title": "Approvals",
+            "intro": "When a body hits a permission wall it can ask; you allow it once, here or on Home. "
+                     "An approval is spent by the one action it names.",
+            "sections": [{"id": "recent", "blocks": [{"type": "list", "items": items}] if items
+                          else [{"type": "text", "tone": "muted", "text": "Nothing asked yet."}]}]}
+
+
+def caller_who(req):
+    """The member acting on loom's page (its caller, in a household), if it names one cleanly."""
+    c = (req or {}).get("caller") or {}
+    who = c.get("who") if isinstance(c, dict) and c.get("kind") == "owner" else None
+    return who if isinstance(who, str) and re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", who) else None
+
+
+def ui_act(req):
+    action = (req or {}).get("action")
+    aid = ((req or {}).get("fields") or {}).get("id", "")
+    if action not in ("allow", "deny") or not ID.match(str(aid)):
+        return {"ok": False, "message": "That isn't an approval.", "page": ""}
+    try:
+        a = answer(aid, action, caller_who(req))
+    except (LookupError, PermissionError) as e:
+        return {"ok": False, "message": str(e), "page": ""}
+    return {"ok": True, "message": f"{'Allowed once' if action == 'allow' else 'Denied'}: {a['what']}"
+            + (f" (for {a['minutes']} min)" if action == "allow" else ""), "page": ""}
+
+
+# ---------------------------------------------------------------- the piece API
+
+def api_answer(req):
+    def refuse(status, error):
+        return {"status": status, "body": {"error": error}}
+    if not isinstance(req, dict) or req.get("path") != "run":
+        return refuse(404, "the one call is run")
+    caller = req.get("caller") or {}
+    if caller.get("kind") != "agent":
+        return refuse(403, "only an agent's bodies ask here; the owner answers on the page")
+    argv = (req.get("body") or {}).get("argv")
+    if not isinstance(argv, list) or not 1 <= len(argv) <= 14 or not all(isinstance(a, str) and len(a) <= 600 for a in argv):
+        return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID | use ID --kind K --target T")
+    try:
+        return {"status": 200, "body": {"exit": 0, "stdout": run(argv, caller), "stderr": ""}}
+    except (ValueError, LookupError, PermissionError) as e:
+        return {"status": 200, "body": {"exit": 1, "stdout": "", "stderr": f"approvals: {e}\n"}}
+
+
+def run(argv, caller=None):
+    ap = argparse.ArgumentParser(prog="approvals", add_help=False, exit_on_error=False)
+    sub = ap.add_subparsers(dest="cmd")
+    r = sub.add_parser("request", add_help=False, exit_on_error=False)
+    for f in ("--kind", "--target", "--what", "--why", "--minutes"):
+        r.add_argument(f, default="")
+    r.add_argument("--as", dest="as_", default="")
+    sub.add_parser("check", add_help=False, exit_on_error=False).add_argument("id")
+    u = sub.add_parser("use", add_help=False, exit_on_error=False)
+    u.add_argument("id")
+    u.add_argument("--kind", default="")
+    u.add_argument("--target", default="")
+    u.add_argument("--as", dest="as_", default="")
+    sub.add_parser("list", add_help=False, exit_on_error=False)
+    try:
+        a = ap.parse_args(argv)
+    except (argparse.ArgumentError, SystemExit) as e:
+        raise ValueError(f"usage: {e}") from None
+    if a.cmd in ("request", "use") and a.as_:
+        # A piece on loom's machine acting for a body (the clock filing or spending a house's
+        # approval) names it with --as; only a local call may say so.
+        if caller:
+            raise PermissionError("--as is for a piece on loom's machine acting for a body, not over the API")
+        try:
+            caller = json.loads(a.as_)
+        except ValueError:
+            raise ValueError("--as is the caller's JSON") from None
+    if a.cmd == "request":
+        x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None)
+        if x["state"] == "allowed":
+            return f"{x['id']}: already allowed (until {x['expires']}); use it: approvals use {x['id']} --kind {x['kind']} --target '{x['target']}'\n"
+        return f"{x['id']}: asked the owner (a card on loom's Home); check it: approvals check {x['id']}\n"
+    if a.cmd == "check":
+        return get(a.id)["state"] + "\n"
+    if a.cmd == "use":
+        use(caller, a.id, a.kind, a.target)
+        return f"{a.id}: used\n"
+    if a.cmd == "list":
+        if caller:
+            raise PermissionError("the list is the owner's, on loom's machine")
+        return "".join(f"{x['id']} {x['state']:<8} {x['kind']} {x['target']} — {x['who']['agent']}: {x['what']}\n" for x in recent()[:30])
+    raise ValueError("request | check | use | list")
+
+
+# ---------------------------------------------------------------- in a house
+
+def in_a_house():
+    """A house is known by what a body can't change (podman's /run/.containerenv, a bind mount),
+    not HOUSE_ID alone, which a body can unset: there it never keeps a store or answers as the piece."""
+    return os.path.exists("/run/.containerenv") or bool(os.environ.get("HOUSE_ID"))
+
+
+def forward(piece, argv):
+    """Run this command as loom's piece instead, through loom's piece API (POST /api/<piece>/run) as this
+    body's own token: LOOM_URL (the /mcp URL is fine) and LOOM_TOKEN_FILE (in a loom-box house,
+    /run/secrets/loom-token by default). Prints what the piece printed and exits with its code."""
+    url, tokfile = os.environ.get("LOOM_URL"), os.environ.get("LOOM_TOKEN_FILE")
+    if not tokfile and os.path.exists("/run/secrets/loom-token"):
+        tokfile = "/run/secrets/loom-token"
+    if not url or not tokfile:
+        sys.exit(f"{piece}: in a house this runs through loom's piece API: set LOOM_URL and LOOM_TOKEN_FILE")
+    base = url.rstrip("/").removesuffix("/mcp")
+    with open(tokfile) as f:
+        token = f.read().strip()
+    req = urllib.request.Request(f"{base}/api/{piece}/run", data=json.dumps({"argv": argv}).encode(), method="POST",
+                                 headers={"content-type": "application/json", "authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            why = json.load(e).get("error")
+        except ValueError:
+            why = None
+        sys.exit(f"{piece}: loom refused {argv[0] if argv else 'the call'}: {why or f'{e.code} {e.reason}'}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        sys.exit(f"{piece}: couldn't reach loom at {base}: {e}")
+    sys.stdout.write(body.get("stdout") or "")
+    sys.stderr.write(body.get("stderr") or "")
+    code = body.get("exit")
+    sys.exit(code if isinstance(code, int) else 1)
+
+
+def main():
+    args = sys.argv[1:]
+    # In a house the store isn't here: it's loom's machine's, through the piece API, as the
+    # house's own token (like the clock). On loom's machine the user account is the boundary:
+    # its bodies have the host's own escapes anyway; approvals bind houses.
+    if in_a_house():
+        if args[:1] in (["ui"], ["api"]):
+            sys.exit("approvals: the piece runs on loom's machine, not in a house")
+        forward("approvals", args)
+    if args[:1] == ["ui"]:
+        rest = [a for a in args[1:] if a != "--json"]
+        if not rest:
+            print(json.dumps(ui_manifest()))
+        elif rest == ["page"]:
+            print(json.dumps(ui_page(json.loads(sys.stdin.read() or "{}"))))
+        elif rest == ["act"]:
+            print(json.dumps(ui_act(json.loads(sys.stdin.read() or "{}"))))
+        else:
+            sys.exit(2)
+        return
+    if args[:1] == ["api"]:
+        try:
+            req = json.loads(sys.stdin.read())
+        except ValueError:
+            req = None
+        print(json.dumps(api_answer(req)))
+        return
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+    try:
+        sys.stdout.write(run(args))
+    except (ValueError, LookupError, PermissionError) as e:
+        sys.exit(f"approvals: {e}")
+
+
+if __name__ == "__main__":
+    main()
