@@ -324,7 +324,9 @@ def ui_manifest():
     pending = [a for a in rows if a["state"] == "pending"][:10]
     # loom's Inbox: what's waiting is a permission; what was answered is its history (Answered).
     done = [a for a in rows if a["state"] in OUTCOME][:20]
-    return {"v": 2, "asks": [{
+    # The tab makes the page real: without it loom serves no /p/approvals, and the asks' and answered rows' links led
+    # nowhere. Visited rarely, so it sits under Setup.
+    return {"v": 2, "tab": {"label": "Approvals", "kind": "setting"}, "asks": [{
         "text": f"{name_of(a['who']['agent'])} asks: {what_of(a)}",
         "meta": meta_of(a),
         "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
@@ -337,18 +339,104 @@ def ui_manifest():
     } for a in done]}
 
 
+def ago(stamp, t=None):
+    """How long ago, in words: "just now", "5 min ago", "3 hours ago", "yesterday", "4 days ago", else the date."""
+    try:
+        d = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return ""
+    s = max(0, ((t or now()) - d).total_seconds())
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{int(s // 60)} min ago"
+    if s < 86400:
+        h = int(s // 3600)
+        return f"{h} hour{'' if h == 1 else 's'} ago"
+    days = int(s // 86400)
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    return "on " + d.astimezone().strftime("%b %-d")
+
+
+def cap(text):
+    """A body's words as a sentence on the page: its first letter capital, unless an id leads (t-12: …)."""
+    return text if re.match(r"[a-z]-\d", text) else text[:1].upper() + text[1:]
+
+
+def member(by):
+    """A household member's slug as a name: "jonathan-barket" -> "Jonathan Barket"."""
+    return " ".join(w[:1].upper() + w[1:] for w in str(by).split("-") if w)
+
+
+def kind_of(a):
+    """The wall it hit and exactly what for, in words; a wake's internal key is left out (meta_of)."""
+    kind = KIND_WORDS.get(a["kind"], a["kind"].replace("-", " ").capitalize())
+    target = None if a["kind"] == "local-wake" and re.fullmatch(r"[a-z][a-z0-9-]*:[0-9a-f]{8,}", a["target"] or "") else a["target"]
+    return kind + (f": {target}" if target else "")
+
+
+def from_of(a):
+    later = " (or a later one)" if spender(a["who"])[1] == "house" else ""
+    return f"from {place_of(a['who'])}{later}"
+
+
+def answers_of(a):
+    return [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}},
+            {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}]
+
+
+def outcome_of(a):
+    """How it went and who decided, in words: "Allowed by Jonathan Barket, and used"."""
+    by = f" by {member(a['by'])}" if a.get("by") else ""
+    return {"used": f"Allowed{by}, and used", "allowed": f"Allowed{by}, not used yet",
+            "expired": f"Allowed{by}, expired unused", "denied": f"Denied{by}"}.get(a["state"], a["state"].capitalize())
+
+
+def past_meta(a):
+    """What it would have done, how it went, when, and why: wrapped on the page, nothing cut."""
+    when = ago(a.get("used") or a.get("decided") or a["at"])
+    return " · ".join(x for x in (what_of(a), f"{outcome_of(a)} {when}".strip(), f"“{a['why']}”") if x)
+
+
 def ui_page(req):
     if (req or {}).get("path", "") != "":
         return {"title": "Not found", "sections": []}
-    rows = recent()[:30]
-    tone = {"pending": "warn", "allowed": "ok", "used": "ok", "denied": "bad"}
-    items = [{"text": f"{name_of(a['who']['agent'])} · {what_of(a)}", "tone": tone.get(a["state"]),
-              "meta": f"{STATE_WORDS.get(a['state'], a['state'].capitalize())} · {meta_of(a)}"} for a in rows]
+    rows = recent()
+    pending = [a for a in rows if a["state"] == "pending"]
+    past = [a for a in rows if a["state"] != "pending"][:60]
+    sections = []
+    if pending:
+        # Each waiting approval: what it would do, and why, in words; Allow once and Deny in its sheet.
+        sections.append({"id": "waiting", "title": "Waiting on you", "tone": "warn", "blocks": [{"type": "panel", "rows": [{
+            "label": f"{name_of(a['who']['agent'])} asks: {kind_of(a)}", "agent": a["who"]["agent"], "tone": "warn",
+            "value": cap(what_of(a)), "detail": f"“{a['why']}” · {ago(a['at'])}",
+            "sheet": {"title": f"{name_of(a['who']['agent'])} asks", "blocks": [
+                {"type": "text", "text": cap(what_of(a))},
+                {"type": "text", "tone": "muted", "text": f"{kind_of(a)}, {from_of(a)}, {ago(a['at'])}. “{a['why']}”"},
+                {"type": "text", "tone": "muted", "text": f"Allowing it lets that one action through once, within {a['minutes']} min."},
+                {"type": "buttons", "items": answers_of(a)},
+            ]},
+        } for a in pending[:20]]}]})
+    else:
+        sections.append({"id": "waiting", "blocks": [{"type": "health", "tone": "ok", "text": "Nothing waiting on you",
+                                                      "detail": "When a body asks for an approval, it shows here and on Home."}]})
+    if past:
+        sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
+            "text": f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
+            "tone": {"denied": "bad", "expired": "muted"}.get(a["state"]),
+        } for a in past]}]})
+    if rows:
+        sections.append({"id": "record", "blocks": [{"type": "panel", "rows": [{
+            "label": "The record", "value": "Each approval's id, kind and exact target",
+            "sheet": {"title": "The record", "blocks": [{"type": "code", "label": "id  state  kind  target  asked from",
+                "text": "\n".join(f"{a['id']}  {a['state']}  {a['kind']}  {a['target']}  {a['who'].get('agent')}@{a['who'].get('where')}" for a in rows[:60])}]},
+        }]}]})
     return {"title": "Approvals",
-            "intro": "When a body hits a permission wall it can ask; you allow it once, here or on Home. "
-                     "An approval is spent by the one action it names.",
-            "sections": [{"id": "recent", "blocks": [{"type": "list", "items": items}] if items
-                          else [{"type": "text", "tone": "muted", "text": "Nothing asked yet."}]}]}
+            "intro": "A body that hits a permission wall asks; you allow it once. It's spent by the one action it names.",
+            "sections": sections}
 
 
 def caller_who(req):

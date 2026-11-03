@@ -199,11 +199,53 @@ class Approvals(unittest.TestCase):
         a = {"kind": "deploy-gate", "target": "acme/app", "why": "ship", "who": {"agent": "ada", "where": "a body"}}
         self.assertEqual(ap.meta_of(a), "Deploy gate: acme/app · from a body · “ship”")
 
-    def test_the_page_lists_them(self):
-        self.ask()
+    def test_the_manifest_has_a_tab_so_its_links_land_on_a_page(self):
+        # Without a tab loom serves no /p/approvals: every ask's and answered row's page "" was a dead link.
+        aid = self.ask()
+        m = ap.ui_manifest()
+        self.assertEqual(m["tab"], {"label": "Approvals", "kind": "setting"})
+        self.assertEqual(m["asks"][0]["page"], "")
+        ap.ui_act({"action": "deny", "fields": {"id": aid}})
+        self.assertEqual(ap.ui_manifest()["answered"][0]["page"], "")
+        self.assertNotEqual(ap.ui_page({"path": ""})["title"], "Not found")
+
+    def test_the_page_puts_what_waits_first_with_its_answers_in_a_sheet(self):
+        aid = self.ask()
         page = ap.ui_page({"path": ""})
         self.assertEqual(page["title"], "Approvals")
-        self.assertTrue(page["sections"][0]["blocks"][0]["items"][0]["meta"].startswith("Waiting on you · A GitHub write"))
+        waiting = page["sections"][0]
+        self.assertEqual((waiting["id"], waiting["tone"]), ("waiting", "warn"))
+        row = waiting["blocks"][0]["rows"][0]
+        self.assertEqual(row["label"], "Ada asks: A GitHub write: acme/app:octocat")
+        self.assertEqual(row["value"], "Push the fix to acme/app b")
+        self.assertEqual(row["detail"], "“Sam asked for it in #general” · just now")
+        buttons = [b for b in row["sheet"]["blocks"] if b["type"] == "buttons"][0]["items"]
+        self.assertEqual([(b["action"], b["label"], b["fields"]) for b in buttons], [("allow", "Allow once", {"id": aid}), ("deny", "Deny", {"id": aid})])
+        # No raw id in what people read: only in the record's sheet.
+        shown = json.dumps([s for s in page["sections"] if s["id"] != "record"])
+        self.assertNotIn(aid, shown.replace(json.dumps({"id": aid})[1:-1], ""))
+        self.assertIn(aid, json.dumps([s for s in page["sections"] if s["id"] == "record"]))
+
+    def test_the_page_says_how_each_answered_one_went_in_words(self):
+        aid = self.ask()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": {"kind": "owner", "who": "pat-owner", "agents": "*"}})
+        self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"])
+        aid2 = self.ask(target="acme/web:octocat")
+        ap.ui_act({"action": "deny", "fields": {"id": aid2}})
+        page = ap.ui_page({"path": ""})
+        self.assertEqual(page["sections"][0]["blocks"][0]["type"], "health", "nothing waiting: a plain headline")
+        answered = next(s for s in page["sections"] if s["id"] == "answered")["blocks"][0]
+        self.assertTrue(answered["wrap"], "a body's words are shown whole")
+        metas = {i["meta"].split(" · ")[1] for i in answered["items"]}
+        self.assertEqual(metas, {"Allowed by Pat Owner, and used just now", "Denied just now"})
+        self.assertEqual({i["text"] for i in answered["items"]}, {"Ada · A GitHub write: acme/web:octocat", "Ada · A GitHub write: acme/app:octocat"})
+
+    def test_ago_says_it_in_words(self):
+        from datetime import timedelta
+        t = ap.now()
+        for secs, words in ((5, "just now"), (300, "5 min ago"), (7200, "2 hours ago"), (90000, "yesterday"), (3 * 86400, "3 days ago")):
+            self.assertEqual(ap.ago(ap.iso(t - timedelta(seconds=secs)), t), words)
+        self.assertTrue(ap.ago(ap.iso(t - timedelta(days=30)), t).startswith("on "))
 
 
 class Home(unittest.TestCase):
