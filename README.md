@@ -67,7 +67,12 @@ finds its piece home from where it's installed and reads the owner's
 
 - **The page.** `ui --json` puts each pending approval under "Your call" on
   loom's Home (an Inbox `permission`, with *Allow once* and *Deny*) and the
-  answered ones in its history. `ui page --json` is the Approvals list.
+  answered ones in its history, each linking to the piece's page. The manifest's
+  `tab` (`Approvals`, under Setup) is what makes that page exist at
+  `/p/approvals`. `ui page --json` is an app page: what's waiting first, each a
+  row whose sheet holds *Allow once* and *Deny*; then what was answered, each
+  body's words whole, with how it went, who decided and when, in words; raw ids
+  only behind *The record*.
   `ui act --json` takes Allow and Deny, and records who answered when loom
   names the household member (`caller.who`).
 - **The piece API.** `api --json` (loom's `POST /api/approvals/run`) is how a
