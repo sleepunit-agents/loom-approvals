@@ -326,7 +326,7 @@ def ui_manifest():
     done = [a for a in rows if a["state"] in OUTCOME][:20]
     # The tab makes the page real: without it loom serves no /p/approvals, and the asks' and answered rows' links led
     # nowhere. Visited rarely, so it sits under Setup.
-    return {"v": 2, "tab": {"label": "Approvals", "kind": "setting"}, "asks": [{
+    return {"v": 2, "tab": {"label": "Approvals", "kind": "setting", "icon": "stamp"}, "asks": [{
         "text": f"{name_of(a['who']['agent'])} asks: {what_of(a)}",
         "meta": meta_of(a),
         "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
