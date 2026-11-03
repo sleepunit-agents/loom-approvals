@@ -203,7 +203,7 @@ class Approvals(unittest.TestCase):
         # Without a tab loom serves no /p/approvals: every ask's and answered row's page "" was a dead link.
         aid = self.ask()
         m = ap.ui_manifest()
-        self.assertEqual(m["tab"], {"label": "Approvals", "kind": "setting"})
+        self.assertEqual(m["tab"], {"label": "Approvals", "kind": "setting", "icon": "stamp"})
         self.assertEqual(m["asks"][0]["page"], "")
         ap.ui_act({"action": "deny", "fields": {"id": aid}})
         self.assertEqual(ap.ui_manifest()["answered"][0]["page"], "")
