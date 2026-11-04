@@ -80,6 +80,14 @@ finds its piece home from where it's installed and reads the owner's
   house's own token. Only an agent's bodies reach it; the owner answers on
   the page, never through the API, and `list` is the owner's, on loom's
   machine.
+- **A Needs you that waits on one.** An agent's ask in its conversation
+  digest can say it waits on an approval (`waits_on: {"approval": "a-…"}`,
+  loom `docs/specs/conversations.md`). loom's Inbox then shows that card's
+  *Allow once* and *Deny* inside the ask, posted here as the card's would be
+  (one item, not two), and clears the ask once the approval is answered. It
+  reads that through `api --json` path `state` (`{"ids": ["a-…"]}`, the
+  owner's caller only): each known id's state, agent and kind, no words. An
+  id it has no record of is left out.
 - **In a house** (a container: `/run/.containerenv`, or `HOUSE_ID`), the
   command forwards itself to loom's piece API with `LOOM_URL` and
   `LOOM_TOKEN_FILE` (default `/run/secrets/loom-token`), so the store is
