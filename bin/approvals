@@ -461,11 +461,32 @@ def ui_act(req):
 
 # ---------------------------------------------------------------- the piece API
 
+STATE_MAX = 50
+
+
+def states(ids):
+    """What loom's core reads to clear a Needs you that waits on an approval (loom docs/specs/conversations.md): each
+    known id's state and whose it is. No words: core shows the card's own (ui --json) while it waits."""
+    with Store() as s:
+        rows = s.d["approvals"]
+        return {i: {"state": state_of(rows[i]), "agent": rows[i]["who"].get("agent"), "kind": rows[i]["kind"]}
+                for i in ids if i in rows}
+
+
 def api_answer(req):
     def refuse(status, error):
         return {"status": status, "body": {"error": error}}
+    if isinstance(req, dict) and req.get("path") == "state":
+        # The owner's read (core, for the household): which of these approvals are still pending. Reading is all;
+        # answering stays on the page (ui act), and a body never reads another's here.
+        if (req.get("caller") or {}).get("kind") != "owner":
+            return refuse(403, "state is the owner's read; a body checks its own with run check")
+        ids = (req.get("body") or {}).get("ids")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= STATE_MAX or not all(isinstance(i, str) and ID.match(i) for i in ids):
+            return refuse(400, f"ids: 1 to {STATE_MAX} approval ids (a- and 8 hex digits)")
+        return {"status": 200, "body": {"approvals": states(ids)}}
     if not isinstance(req, dict) or req.get("path") != "run":
-        return refuse(404, "the one call is run")
+        return refuse(404, "the calls are run (a body's) and state (the owner's)")
     caller = req.get("caller") or {}
     if caller.get("kind") != "agent":
         return refuse(403, "only an agent's bodies ask here; the owner answers on the page")

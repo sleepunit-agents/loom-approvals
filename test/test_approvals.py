@@ -117,6 +117,29 @@ class Approvals(unittest.TestCase):
         # Words are required: the owner decides by them.
         self.assertEqual(self.api(["request", "--kind", "github-write", "--target", "t", "--what", "w"])["body"]["exit"], 1)
 
+    def test_the_owner_reads_states_for_a_needs_you_and_nobody_else_does(self):
+        aid = self.ask()
+        other = self.ask(target="acme/web:octocat")
+        state = lambda ids, c={"kind": "owner", "agents": "*"}: ap.api_answer({"caller": c, "path": "state", "body": {"ids": ids}})
+        r = state([aid, other, "a-00000000"])
+        self.assertEqual(r["status"], 200)
+        # Known ids only: one it has no record of is left out (core reads that as gone).
+        self.assertEqual(r["body"]["approvals"], {aid: {"state": "pending", "agent": "ada", "kind": "github-write"},
+                                                  other: {"state": "pending", "agent": "ada", "kind": "github-write"}})
+        ap.answer(aid, "allow")
+        self.assertEqual(state([aid])["body"]["approvals"][aid]["state"], "allowed")
+        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"])["body"]["exit"], 0)
+        self.assertEqual(state([aid])["body"]["approvals"][aid]["state"], "used")
+        ap.answer(other, "deny")
+        self.assertEqual(state([other])["body"]["approvals"][other]["state"], "denied")
+        # No words in it: core shows the card's own while it waits.
+        self.assertNotIn("push the fix", json.dumps(state([aid, other])))
+        # A body (or a piece) doesn't read it, and nothing is answered through it.
+        for c in (HOUSE, {"kind": "piece", "subject": "box-1"}, {}):
+            self.assertEqual(state([aid], c)["status"], 403)
+        for bad in ([], ["nope"], [aid] * 51, "a-00000000"):
+            self.assertEqual(state(bad)["status"], 400)
+
     def test_a_piece_on_loom_s_machine_spends_it_for_the_body_it_acts_for_and_only_locally(self):
         # The clock runs a house's `wake relay` here, so it spends the house's approval with --as.
         r = self.api(["request", "--kind", "relay", "--target", "ada->cy", "--what", "relay to cy", "--why", "ask about the tracks"])
