@@ -565,6 +565,17 @@ class Rules(unittest.TestCase):
         self.rules(("github:acme/*", "do"))
         with mock.patch.object(ap, "projects", lambda: None):
             self.assertEqual(self.api(["rule", "merge", f"github:acme/pond#1@{SHA}"])["stdout"], "do\n")
+        # Straight at resolve: no project rule, no list: the pattern stands. An exact repo stands even beside one.
+        do = [ap.make_rule("merge", "github:acme/*", "do", "x")]
+        self.assertEqual(ap.resolve(do, "merge", T, None)[0], "do")
+        exact = do + [ap.make_rule("merge", "project:pond", "ask", "x"), ap.make_rule("merge", "github:acme/app", "tell", "x")]
+        self.assertEqual(ap.resolve(exact, "merge", T, None)[0], "tell")
+        # tell, blind: refused, saying the real reason.
+        self.rules(("project:pond", "ask"), ("github:acme/*", "do"))
+        with mock.patch.object(ap, "projects", lambda: None):
+            r = self.api(["tell", "--kind", "merge", "--target", T, "--what", "merged it"])
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("project list couldn't be read", r["stderr"])
 
     def test_tell_refuses_words_it_would_have_to_cut(self):
         self.rules(("github:acme/*", "tell"))
