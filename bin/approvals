@@ -272,8 +272,15 @@ def spender(who):
 DETAILS_MAX = 1000
 
 
-def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None):
+CONVERSATION = re.compile(r"^cv-[0-9a-f]{12}$")
+
+
+def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None, conversation=None):
     who = who_of(caller)
+    # The conversation the body asked from (loom docs/specs/comms.md, "Asks inline"): a Comms thread shows its own
+    # pending approvals. Only its id, checked; it decides nothing about the approval.
+    if conversation and not CONVERSATION.match(conversation):
+        raise ValueError("--conversation is a conversation id, cv- and 12 hex")
     if not KIND.match(kind or ""):
         raise ValueError("--kind is the wall it hit, like github-write or relay")
     if kind in PIECE_KINDS and not acting_for:
@@ -330,6 +337,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
             return {**granted[0], "state": state_of(granted[0])}
         a = {"id": "a-" + secrets.token_hex(4), "kind": kind, "target": target, "what": what, "why": why,
              **{k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v},
+             **({"conversation": conversation} if conversation else {}),
              "who": who, "minutes": mins, "at": iso(now()), "state": "pending"}
         s.d["approvals"][a["id"]] = a
         s.save()
@@ -815,6 +823,7 @@ def ui_manifest():
         **({"details": a["details"]} if a.get("details") else {}),
         "fine": fine_print(a),
         "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
+        **({"conversation": a["conversation"]} if a.get("conversation") else {}),
         "actions": [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}},
                     {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}],
     } for a in pending], "answered": [{
@@ -1103,7 +1112,7 @@ def run(argv, caller=None):
     ap = argparse.ArgumentParser(prog="approvals", add_help=False, exit_on_error=False)
     sub = ap.add_subparsers(dest="cmd")
     r = sub.add_parser("request", add_help=False, exit_on_error=False)
-    for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details"):
+    for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details", "--conversation"):
         r.add_argument(f, default="")
     r.add_argument("--if-yes", dest="if_yes", default="")
     r.add_argument("--if-no", dest="if_no", default="")
@@ -1144,7 +1153,7 @@ def run(argv, caller=None):
     if a.cmd == "request":
         x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None,
                     acting_for=bool(a.as_), ask=a.ask or None, if_yes=a.if_yes or None, if_no=a.if_no or None,
-                    details=a.details or None)
+                    details=a.details or None, conversation=a.conversation or None)
         if x["state"] == "denied":
             return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
         if x["state"] == "allowed":
@@ -1224,6 +1233,10 @@ def main():
     if in_a_house():
         if args[:1] in (["ui"], ["api"]):
             sys.exit("approvals: the piece runs on loom's machine, not in a house")
+        # A body's request names its conversation (the runtime sets LOOM_BODY_CONVERSATION), unless it says one itself.
+        conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
+        if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.match(conv):
+            args = [*args, "--conversation", conv]
         forward("approvals", args)
     if args[:1] == ["ui"]:
         rest = [a for a in args[1:] if a != "--json"]

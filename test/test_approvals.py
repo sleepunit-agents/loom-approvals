@@ -632,6 +632,28 @@ class PlainAsks(unittest.TestCase):
         self.assertEqual(sheet[2]["items"], [{"label": "If you allow", "value": self.GOOD[5]}, {"label": "If you deny", "value": self.GOOD[7]}])
         self.assertTrue(sheet[-1]["text"].startswith("Exactly what this allows: "))
 
+    def test_a_request_names_its_conversation_and_the_manifest_carries_it(self):
+        # loom docs/specs/comms.md, "Asks inline": a Comms thread shows the pending approvals asked from it.
+        r = self.ask(*self.GOOD, "--conversation", "cv-0123456789ab")
+        self.assertEqual(r["exit"], 0, r)
+        self.assertEqual(ap.ui_manifest()["asks"][0]["conversation"], "cv-0123456789ab")
+        bad = self.ask(*self.GOOD, "--conversation", "cv-nothex", target="acme/app:other")
+        self.assertEqual(bad["exit"], 1)
+        self.assertIn("--conversation is a conversation id", bad["stderr"])
+        plain = self.ask(*self.GOOD, target="acme/app:third")
+        self.assertEqual(plain["exit"], 0, plain)
+        self.assertNotIn("conversation", [a for a in ap.ui_manifest()["asks"] if "third" in a["fine"]][0])
+
+    def test_in_a_house_a_body_s_request_carries_its_conversation(self):
+        seen = {}
+        with mock.patch.object(ap, "in_a_house", return_value=True), \
+             mock.patch.object(ap, "forward", side_effect=lambda piece, argv: seen.setdefault("argv", argv) and (_ for _ in ()).throw(SystemExit(0))), \
+             mock.patch.dict(ap.os.environ, {"LOOM_BODY_CONVERSATION": "cv-00000000000f"}), \
+             mock.patch.object(ap.sys, "argv", ["approvals", "request", "--kind", "relay", "--target", "mark"]):
+            with self.assertRaises(SystemExit):
+                ap.main()
+        self.assertEqual(seen["argv"][-2:], ["--conversation", "cv-00000000000f"])
+
     def test_the_lint_refuses_ids_hashes_rounds_and_lane_words_saying_why(self):
         bad = {"t-40 needs the OAuth click": "a task id", "Merge acme/app#12?": "a pull request or issue id",
                "OK to push a7b81358f7bd?": "a hex id", "Park on the click, round 13?": "a round number",
