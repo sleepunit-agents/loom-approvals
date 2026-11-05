@@ -640,6 +640,10 @@ class PlainAsks(unittest.TestCase):
         bad = self.ask(*self.GOOD, "--conversation", "cv-nothex", target="acme/app:other")
         self.assertEqual(bad["exit"], 1)
         self.assertIn("--conversation is a conversation id", bad["stderr"])
+        newline = self.ask(*self.GOOD, "--conversation", "cv-0123456789ab\n", target="acme/app:nl")
+        self.assertEqual(newline["exit"], 1, "a trailing newline fails the check (fullmatch)")
+        # The manifest says whose it is (the agent loom authenticated), so a thread can check the pair.
+        self.assertEqual(ap.ui_manifest()["asks"][0]["agent"], HOUSE["agent"])
         plain = self.ask(*self.GOOD, target="acme/app:third")
         self.assertEqual(plain["exit"], 0, plain)
         self.assertNotIn("conversation", [a for a in ap.ui_manifest()["asks"] if "third" in a["fine"]][0])

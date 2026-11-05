@@ -272,14 +272,16 @@ def spender(who):
 DETAILS_MAX = 1000
 
 
-CONVERSATION = re.compile(r"^cv-[0-9a-f]{12}$")
+CONVERSATION = re.compile(r"cv-[0-9a-f]{12}")
 
 
 def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None, conversation=None):
     who = who_of(caller)
-    # The conversation the body asked from (loom docs/specs/comms.md, "Asks inline"): a Comms thread shows its own
-    # pending approvals. Only its id, checked; it decides nothing about the approval.
-    if conversation and not CONVERSATION.match(conversation):
+    # The conversation the body says it asked from (loom docs/specs/comms.md, "Asks inline"): a Comms thread shows its
+    # own pending approvals. It's the body's claim, not something loom vouches for: the caller loom authenticates is an
+    # agent (and its house), never a conversation. So it decides nothing about the approval, and loom shows the ask in
+    # a thread only when this approval's agent (who.agent, which loom did authenticate) is that thread's agent.
+    if conversation and not CONVERSATION.fullmatch(conversation):
         raise ValueError("--conversation is a conversation id, cv- and 12 hex")
     if not KIND.match(kind or ""):
         raise ValueError("--kind is the wall it hit, like github-write or relay")
@@ -337,6 +339,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
             return {**granted[0], "state": state_of(granted[0])}
         a = {"id": "a-" + secrets.token_hex(4), "kind": kind, "target": target, "what": what, "why": why,
              **{k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v},
+             # Kept with the agent loom authenticated: the pair is what a thread checks (see request's note).
              **({"conversation": conversation} if conversation else {}),
              "who": who, "minutes": mins, "at": iso(now()), "state": "pending"}
         s.d["approvals"][a["id"]] = a
@@ -1235,7 +1238,7 @@ def main():
             sys.exit("approvals: the piece runs on loom's machine, not in a house")
         # A body's request names its conversation (the runtime sets LOOM_BODY_CONVERSATION), unless it says one itself.
         conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
-        if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.match(conv):
+        if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.fullmatch(conv):
             args = [*args, "--conversation", conv]
         forward("approvals", args)
     if args[:1] == ["ui"]:
