@@ -356,8 +356,8 @@ class Rules(unittest.TestCase):
         tie = [ap.make_rule("merge", "github:acme/*", "do", "x"), ap.make_rule("merge", "github:*/app", "tell", "x")]
         self.assertEqual(ap.resolve(tie, "merge", T)[0], "tell", "a tie goes to the stricter")
         # The project list unreadable: no project rule applies, and the answer says so.
-        t, _, note = ap.resolve(rules, "merge", f"github:acme/pond-ui#1@{SHA}", None)
-        self.assertEqual(t, "tell")
+        t, _, note = ap.resolve(rules, "merge", f"github:acme/other#1@{SHA}", None)
+        self.assertEqual(t, "ask", "fail closed: a do pattern doesn't win while a project rule can't be checked")
         self.assertIn("project list", note)
         with self.assertRaises(ValueError):
             ap.resolve(rules, "merge", "github:acme/app#12")       # no head
@@ -429,6 +429,10 @@ class Rules(unittest.TestCase):
         for c in (member, {"kind": "agent", "agent": "ada"}):
             r = ap.ui_act({"action": "rule", "caller": c, "fields": {"scope": "github:acme/*", "kind": "merge", "tier": "do"}})
             self.assertFalse(r["ok"])
+        self.assertFalse(ap.ui_act({"action": "rule", "fields": {"scope": "github:acme/*", "kind": "merge", "tier": "do"}})["ok"],
+                         "no caller is not the owner: it fails closed")
+        self.assertNotIn("rules", [x["id"] for x in ap.ui_page({"path": ""})["sections"]])
+        self.assertTrue(ap.is_owner({"caller": {"kind": "owner", "who": "jo"}}), "agents absent: unrestricted")
         self.assertEqual(self.api(["rule", "merge", T])["stdout"], "ask\n")
         for argv in (["rule", "set", "github:acme/*", "do"], ["rule-add"], ["rules"]):
             self.assertEqual(self.api(argv)["exit"], 1)
@@ -555,8 +559,23 @@ class Rules(unittest.TestCase):
         self.rules(("project:pond", "ask"), ("github:acme/*", "do"))
         with mock.patch.object(ap, "projects", lambda: None):
             r = self.api(["rule", "merge", f"github:acme/pond#1@{SHA}"])
-        self.assertEqual(r["stdout"], "do\n")
+        self.assertEqual(r["stdout"], "ask\n")
         self.assertIn("project list", r["stderr"])
+        # Without a project rule, the list isn't needed and the pattern stands.
+        self.rules(("github:acme/*", "do"))
+        with mock.patch.object(ap, "projects", lambda: None):
+            self.assertEqual(self.api(["rule", "merge", f"github:acme/pond#1@{SHA}"])["stdout"], "do\n")
+        # Straight at resolve: no project rule, no list: the pattern stands. An exact repo stands even beside one.
+        do = [ap.make_rule("merge", "github:acme/*", "do", "x")]
+        self.assertEqual(ap.resolve(do, "merge", T, None)[0], "do")
+        exact = do + [ap.make_rule("merge", "project:pond", "ask", "x"), ap.make_rule("merge", "github:acme/app", "tell", "x")]
+        self.assertEqual(ap.resolve(exact, "merge", T, None)[0], "tell")
+        # tell, blind: refused, saying the real reason.
+        self.rules(("project:pond", "ask"), ("github:acme/*", "do"))
+        with mock.patch.object(ap, "projects", lambda: None):
+            r = self.api(["tell", "--kind", "merge", "--target", T, "--what", "merged it"])
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("project list couldn't be read", r["stderr"])
 
     def test_tell_refuses_words_it_would_have_to_cut(self):
         self.rules(("github:acme/*", "tell"))

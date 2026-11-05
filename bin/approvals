@@ -466,14 +466,16 @@ def resolve(rules, kind, target, cards=None):
     r = repo_of(target)
     if not r:
         raise ValueError("a merge target is <forge>:<locator>#<n>@<40-hex head>, like github:acme/app#12@…")
-    hits, note = [], None
+    hits = []
+    # Failing closed: with a project rule for this kind and no project list to read, nothing can say this repo isn't
+    # in that project. Only an exact-repo rule (more specific than any project) still stands; otherwise it asks.
+    blind = cards is None and any(x.get("kind") == kind and x.get("scope", "").startswith("project:") for x in rules)
     for rule in rules:
         if rule.get("kind") != kind:
             continue
         scope = rule.get("scope", "")
         if scope.startswith("project:"):
             if cards is None:
-                note = "the project list couldn't be read, so no project rule applied"
                 continue
             slug = scope[len("project:"):]
             if any(c["slug"] == slug and r["repo"] in c["repos"] for c in cards):
@@ -483,10 +485,12 @@ def resolve(rules, kind, target, cards=None):
             if forge == r["forge"] and glob_match(pat.lower(), r["locator"]):
                 stars = pat.count("*")
                 hits.append(((0, 0) if stars == 0 else (2, stars), rule))
+    if blind and not any(h[0] == (0, 0) for h in hits):
+        return "ask", None, "the project list couldn't be read, so this asks (a project rule might apply to this repo)"
     if not hits:
-        return "ask", None, note
+        return "ask", None, None
     hits.sort(key=lambda h: (h[0], STRICT[h[1]["tier"]]))
-    return hits[0][1]["tier"], hits[0][1], note
+    return hits[0][1]["tier"], hits[0][1], None
 
 
 def needs_cards(rules):
@@ -612,9 +616,10 @@ def tell(caller, kind, target, what):
         raise ValueError("--what says what was merged, for the owner")
     with Store() as s:
         rules = list(s.rules())
-    tier, _, _ = resolve(rules, kind, target, projects() if needs_cards(rules) else [])
+    tier, _, note = resolve(rules, kind, target, projects() if needs_cards(rules) else [])
     if tier == "ask":
-        raise PermissionError(f"the rule for {target.split('@')[0]} is ask me: request a merge approval instead")
+        raise PermissionError(f"{note}: request a merge approval instead" if note else
+                              f"the rule for {target.split('@')[0]} is ask me: request a merge approval instead")
     with Store() as s:
         n = {"at": iso(now()), "agent": who["agent"], "kind": kind, "target": target, "what": what}
         s.d.setdefault("notices", []).insert(0, n)
@@ -887,11 +892,11 @@ def rules_section(cards):
 
 
 def is_owner(req):
-    """The household's owner (every agent's), or loom outside a household (no caller): rules are theirs alone."""
+    """The household's owner (every agent's): rules are theirs alone."""
     c = (req or {}).get("caller")
-    if c is None:
-        return True
-    return isinstance(c, dict) and c.get("kind") == "owner" and c.get("agents") == "*"
+    # Fails closed, by loom's own rule for an owner (src/ui/pieces.ts, withGrant): kind owner, agents absent or "*".
+    # No caller (a loom without a household, a run by hand) is not the owner: rules and Always are refused.
+    return isinstance(c, dict) and c.get("kind") == "owner" and c.get("agents") in (None, "*")
 
 
 def caller_who(req):
