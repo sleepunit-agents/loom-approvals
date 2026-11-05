@@ -338,8 +338,8 @@ class Rules(unittest.TestCase):
 
     def rules(self, *rows):
         with ap.Store() as s:
-            s._rules = [ap.make_rule("merge", sc, t, "test") for sc, t in rows]
-            s.save_rules()
+            s.rules()
+            s.replace_rules([ap.make_rule("merge", sc, t, "test") for sc, t in rows])
 
     def test_most_specific_wins_then_strictest(self):
         rules = [ap.make_rule("merge", sc, t, "x") for sc, t in [
@@ -469,7 +469,7 @@ class Rules(unittest.TestCase):
         self.rules(("github:acme/*", "do"))
         t2 = f"github:else/app#2@{SHA}"
         ap.run(["grant", "--kind", "merge", "--target", t2, "--for", "ada", "--by", "jo"])
-        d = json.loads(ap.run(["rule", "merge", T, t2, "--for", "ada", "--json"]))
+        d = json.loads(ap.run(["rule", "merge", T, t2, "--for", "ada", "--json"])[0])
         self.assertEqual(d[T], {"tier": "do", "scope": "github:acme/*"})
         self.assertEqual((d[t2]["tier"], d[t2]["approval"]["state"]), ("ask", "allowed"))
         self.assertEqual(self.api(["rule", "merge", T, "--for", "ada"])["exit"], 1)
@@ -528,6 +528,40 @@ class Rules(unittest.TestCase):
             st.save()
         self.assertEqual(self.api(["use", g2, "--kind", "merge", "--target", t2])["exit"], 0)
 
+    def test_a_project_scope_is_a_slug_and_project_is_no_forge(self):
+        for bad in ("project:Pond", "project:po*nd", "project:foo/bar", "project:"):
+            with self.assertRaises(ValueError, msg=bad):
+                ap.make_rule("merge", bad, "ask", "x")
+        r = ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "project:Pond", "tier": "ask"}})
+        self.assertFalse(r["ok"])
+
+    def test_the_answer_is_for_this_agent_alone(self):
+        ap.run(["grant", "--kind", "merge", "--target", T, "--for", "bo", "--by", "jo"])
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], "ask\n", "bo's yes is not ada's")
+        d = json.loads(ap.run(["rule", "merge", T, "--for", "ada", "--json"])[0])
+        self.assertNotIn("approval", d[T])
+
+    def test_a_rules_file_that_isnt_rules_asks_and_is_never_overwritten(self):
+        path = Path(self.td.name) / "rules.json"
+        for text in ('{"v":1,"rules":{"a":1}}', '{"v":1,"rules":[{"scope":"github:a/*","tier":"sure","kind":"merge"}]}', "not json"):
+            path.write_text(text)
+            self.assertEqual(self.api(["rule", "merge", f"github:a/b#1@{SHA}"])["stdout"], "ask\n", text)
+            self.assertTrue(ap.ui_page({"path": "", "caller": OWNER})["sections"])
+            r = ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "github:x/*", "tier": "do"}})
+            self.assertFalse(r["ok"], text)
+            self.assertEqual(path.read_text(), text, "an edit never writes over a file it couldn't read")
+
+    def test_a_project_list_that_cant_be_read_says_so_on_stderr(self):
+        self.rules(("project:pond", "ask"), ("github:acme/*", "do"))
+        with mock.patch.object(ap, "projects", lambda: None):
+            r = self.api(["rule", "merge", f"github:acme/pond#1@{SHA}"])
+        self.assertEqual(r["stdout"], "do\n")
+        self.assertIn("project list", r["stderr"])
+
+    def test_tell_refuses_words_it_would_have_to_cut(self):
+        self.rules(("github:acme/*", "tell"))
+        self.assertEqual(self.api(["tell", "--kind", "merge", "--target", T, "--what", "x" * 301])["exit"], 1)
+
     def test_rules_show_in_words(self):
         self.rules(("github:onterris/*", "ask"), ("project:pond", "do"), ("github:acme/app", "tell"))
         page = ap.ui_page({"path": "", "caller": OWNER})
@@ -536,6 +570,28 @@ class Rules(unittest.TestCase):
                          [("Everything in onterris", "Ask me"), ("acme/app", "Tell me after"), ("The Pond project", "Just do it")])
         self.assertEqual(rules[-1]["label"], "Add a rule")
         self.assertEqual(rules[0]["choice"]["fields"], {"scope": "github:onterris/*", "kind": "merge"})
+
+
+class Projects(unittest.TestCase):
+    """projects(): the cards a project rule reads, from the command, and None when they can't be read."""
+
+    def run_with(self, cmd):
+        with mock.patch.dict(os.environ, {"APPROVALS_PROJECTS": cmd}):
+            return ap.projects()
+
+    def test_reads_cards_and_normalizes_bare_repos(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        f = Path(td.name) / "cards.json"
+        f.write_text(json.dumps([{"slug": "pond", "name": "Pond", "links": {"repos": ["Acme/Pond", "forgejo:codeberg.org/a/b"]}}]))
+        self.assertEqual(self.run_with(f"cat {f}"), [{"slug": "pond", "name": "Pond", "repos": ["github:acme/pond", "forgejo:codeberg.org/a/b"]}])
+
+    def test_none_when_it_fails_or_isnt_a_list(self):
+        self.assertIsNone(self.run_with("false"))
+        self.assertIsNone(self.run_with("echo nope"))
+        self.assertIsNone(self.run_with("echo {}"))
+        self.assertIsNone(self.run_with("/no/such/command"))
+
 
 if __name__ == "__main__":
     unittest.main()
