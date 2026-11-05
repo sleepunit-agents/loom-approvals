@@ -9,7 +9,7 @@ sees a card on loom's Home, under "Your call", and allows it once or denies it.
 The body then spends the approval on exactly the action it named, once.
 
 ```
-approvals request --kind KIND --target TARGET --what "…" --why "…" [--minutes N]
+approvals request --kind KIND --target TARGET --ask "…" --why "…" --if-yes "…" --if-no "…" [--details "…"] [--minutes N]
 approvals check ID          pending | allowed | denied | used | expired
 approvals use ID --kind KIND --target TARGET
 approvals list              the recent ones (the owner's view, on loom's machine)
@@ -19,8 +19,19 @@ approvals list              the recent ones (the owner's view, on loom's machine
   letters, digits and dashes.
 - **TARGET** is exactly what it's for (`acme/app:octocat`, `ada->bo`). An
   approval allows that kind for that target and nothing else.
-- **--what** and **--why** are the body's own words, shown to the owner,
-  never what decides. They're shown whole or refused: words that don't fit on
+- **--ask** is the one plain question the owner reads, the card's headline,
+  shown whole: at most 140 characters, one line, with no ids (a task's, a pull
+  request's, an internal one), commit hashes, round numbers, lane words, raw
+  site codes (S13) or leading tag (`pond:`). **--why** is at most 240 and the
+  if-lines 200; they may name a pull request or a task, never a hash. It's checked by the same lint as a task's ask
+  (taskstore `src/plain.ts`), and refused with what's wrong and an example.
+  **--why** is one line; **--if-yes** and **--if-no** say what happens either
+  way, and they sit beside Allow and Deny. **--details** is longer text for
+  the sheet (ids are fine there). The kind and target stay machine fields,
+  shown as small print under "Exactly what this allows", never as the
+  headline. The old form, **--what** with **--why**, still works, but its card
+  starts "(no plain question given)" so its caller gets fixed.
+- The words are the body's own, shown to the owner, never what decides. They're shown whole or refused: words that don't fit on
   the card (300 characters, 200 for the target, after Unicode normalizing) are
   never cut, so nothing can hide past the part the owner reads.
 - An allowed approval lasts **--minutes** (60 by default, 8 hours at most),

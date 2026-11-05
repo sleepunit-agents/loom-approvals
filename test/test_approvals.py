@@ -55,7 +55,7 @@ class Approvals(unittest.TestCase):
         self.assertEqual(self.ask(), aid, "asking again is the same card")
         m = ap.ui_manifest()
         self.assertEqual(len(m["asks"]), 1)
-        self.assertIn("push the fix to acme/app b", m["asks"][0]["text"])
+        self.assertEqual(m["asks"][0]["text"], "(no plain question given) Push the fix to acme/app b")
         self.assertNotIn("<b>", json.dumps(m))
         # In words: the wall (named by APPROVALS_KINDS), the target, where it was asked from (no house id), and why.
         self.assertEqual(m["asks"][0]["meta"], "A GitHub write: acme/app:octocat · from Ada's house (or a later one) · “Sam asked for it in #general”")
@@ -239,9 +239,12 @@ class Approvals(unittest.TestCase):
         waiting = page["sections"][0]
         self.assertEqual((waiting["id"], waiting["tone"]), ("waiting", "warn"))
         row = waiting["blocks"][0]["rows"][0]
-        self.assertEqual(row["label"], "Ada asks: A GitHub write: acme/app:octocat")
-        self.assertEqual(row["value"], "Push the fix to acme/app b")
-        self.assertEqual(row["detail"], "“Sam asked for it in #general” · just now")
+        # An old-style request: its words, marked as having no plain question; why as the value; the kind and target
+        # only in the sheet's small print.
+        self.assertEqual(row["label"], "(no plain question given) Push the fix to acme/app b")
+        self.assertEqual(row["value"], "Sam asked for it in #general")
+        self.assertEqual(row["detail"], "Ada · just now")
+        self.assertIn("A GitHub write: acme/app:octocat", json.dumps(row["sheet"]["blocks"][-1]))
         buttons = [b for b in row["sheet"]["blocks"] if b["type"] == "buttons"][0]["items"]
         self.assertEqual([(b["action"], b["label"], b["fields"]) for b in buttons], [("allow", "Allow once", {"id": aid}), ("deny", "Deny", {"id": aid})])
         # No raw id in what people read: only in the record's sheet.
@@ -450,7 +453,7 @@ class Rules(unittest.TestCase):
         t = f"github:acme/pond-ui#3@{SHA}"
         aid = self.api(["request", "--kind", "merge", "--target", t, "--what", "merge pond-ui#3", "--why", "green"])["stdout"].split(":")[0]
         sheet = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]
-        labels = [b["label"] for b in sheet["blocks"][-1]["items"]]
+        labels = [b["label"] for b in next(x for x in sheet["blocks"] if x["type"] == "buttons")["items"]]
         self.assertEqual(labels, ["Allow once", "Always for Pond", "Deny"])
         r = ap.ui_act({"action": "always", "caller": OWNER, "fields": {"id": aid}})
         self.assertTrue(r["ok"], r)
@@ -589,6 +592,115 @@ class Rules(unittest.TestCase):
                          [("Everything in onterris", "Ask me"), ("acme/app", "Tell me after"), ("The Pond project", "Just do it")])
         self.assertEqual(rules[-1]["label"], "Add a rule")
         self.assertEqual(rules[0]["choice"]["fields"], {"scope": "github:onterris/*", "kind": "merge"})
+
+
+
+class PlainAsks(unittest.TestCase):
+    """The card says what it's asking in plain words: --ask, --why, --if-yes, --if-no (taskstore's lint)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(ap, "STATE", Path(self.td.name))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.td.cleanup()
+
+    def api(self, argv):
+        return ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": argv}})["body"]
+
+    GOOD = ["--ask", "A change to Art's sync script landed. OK to start updating lane prompts on loom again?",
+            "--why", "The script that copies lane prompts to loom changed, so it stopped until you look.",
+            "--if-yes", "Lane prompt changes go live again.", "--if-no", "Lane prompts stay as they are until you look."]
+
+    def ask(self, *extra, kind="github-write", target="acme/app:octocat"):
+        return self.api(["request", "--kind", kind, "--target", target, *extra])
+
+    def test_a_plain_ask_is_the_cards_headline_with_what_happens_either_way(self):
+        r = self.ask(*self.GOOD, "--details", "It changed in PR 12 (commit a7b81358f7bd).\nNothing else moved.")
+        self.assertEqual(r["exit"], 0, r)
+        m = ap.ui_manifest()["asks"][0]
+        self.assertEqual(m["text"], self.GOOD[1])
+        self.assertEqual((m["why"], m["if_yes"], m["if_no"]), (self.GOOD[3], self.GOOD[5], self.GOOD[7]))
+        self.assertEqual(m["meta"], self.GOOD[3])
+        self.assertIn("a7b81358f7bd", m["details"], "details may carry ids: they're the sheet's, not the headline")
+        self.assertIn("acme/app:octocat", m["fine"], "the target is the small print")
+        self.assertNotIn("acme/app:octocat", m["text"])
+        sheet = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]["blocks"]
+        self.assertEqual(sheet[0]["text"], self.GOOD[1])
+        self.assertEqual(sheet[2]["items"], [{"label": "If you allow", "value": self.GOOD[5]}, {"label": "If you deny", "value": self.GOOD[7]}])
+        self.assertEqual(sheet[-1]["summary"], "Exactly what this allows")
+
+    def test_the_lint_refuses_ids_hashes_rounds_and_lane_words_saying_why(self):
+        bad = {"t-40 needs the OAuth click": "a task id", "Merge acme/app#12?": "a pull request or issue id",
+               "OK to push a7b81358f7bd?": "a hex id", "Park on the click, round 13?": "a round number",
+               "OK to run the chain-check now?": "a lane or wake word", "lane: OK to push?": "a leading tag",
+               "x" * 141: "over 140 characters", "Is S13 back?": "a raw site or unit code"}
+        for text, what in bad.items():
+            argv = list(self.GOOD)
+            argv[1] = text
+            r = self.ask(*argv)
+            self.assertEqual(r["exit"], 1, text)
+            self.assertIn(what, r["stderr"], text)
+            self.assertIn("For example", r["stderr"])
+        # why and the if-lines may name a pull request, never a hash.
+        argv = list(self.GOOD)
+        argv[3] = "It changed in acme/app#12."
+        self.assertEqual(self.ask(*argv)["exit"], 0)
+        argv[5] = "It pushes a7b81358f7bd."
+        self.assertEqual(self.ask(*argv, target="acme/other:octocat")["exit"], 1)
+        # An ask needs its why and both if-lines.
+        self.assertEqual(self.ask("--ask", self.GOOD[1], "--why", "x")["exit"], 1)
+
+    def test_140_is_the_limit_and_the_headline_is_whole(self):
+        ask = ("OK to " + "move " * 40)[:139] + "?"
+        self.assertEqual(len(ask), 140)
+        argv = list(self.GOOD)
+        argv[1] = ask
+        self.assertEqual(self.ask(*argv)["exit"], 0)
+        self.assertEqual(ap.ui_manifest()["asks"][0]["text"], ask, "whole, never cut")
+        row = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]
+        self.assertEqual(row["label"], ask)
+        argv[1] = ask[:-1] + "x?"
+        self.assertEqual(self.ask(*argv, target="acme/other:octocat")["exit"], 1, "141")
+
+    def test_words_that_are_only_markup_are_no_words(self):
+        argv = list(self.GOOD)
+        argv[5] = "<>"
+        r = self.ask(*argv)
+        self.assertEqual(r["exit"], 1)
+        self.assertEqual(ap.ui_manifest()["asks"], [])
+
+    def test_a_long_hash_is_an_id_too(self):
+        self.assertTrue(ap.plain_findings("ask", "OK to push " + "ab12" * 16 + "?"))
+
+    def test_asking_again_plainly_upgrades_a_pending_card(self):
+        self.ask("--what", "lane push held", "--why", "the gate changed")
+        self.assertEqual(self.ask(*self.GOOD)["exit"], 0)
+        m = ap.ui_manifest()["asks"]
+        self.assertEqual(len(m), 1)
+        self.assertEqual((m[0]["text"], m[0]["if_yes"]), (self.GOOD[1], self.GOOD[5]))
+
+    def test_the_answered_row_leads_with_the_ask(self):
+        aid = self.ask(*self.GOOD)["stdout"].split(":")[0]
+        ap.ui_act({"action": "deny", "fields": {"id": aid}})
+        row = next(x for x in ap.ui_page({"path": ""})["sections"] if x["id"] == "answered")["blocks"][0]["items"][0]
+        self.assertEqual(row["text"], self.GOOD[1])
+
+    def test_an_old_style_request_still_works_and_says_it_has_no_plain_question(self):
+        r = self.ask("--what", "lane push held: the merge also changed the gate", "--why", "the gate changed")
+        self.assertEqual(r["exit"], 0, r)
+        m = ap.ui_manifest()["asks"][0]
+        self.assertTrue(m["text"].startswith("(no plain question given) "), m["text"])
+        self.assertNotIn("if_yes", m)
+
+    def test_example_asks_pass_the_lint(self):
+        # Examples of the shape callers send (each caller's own suite runs its real asks through this lint).
+        for ask in ("A change to Art's sync script landed in pull request 61. OK to start updating lane prompts on loom again?",
+                    "OK to run Art's reflect routine on loom's machine now?",
+                    "OK for Art to push a fix to loom as Art's GitHub account?"):
+            self.assertEqual(ap.plain_findings("ask", ask), [], ask)
 
 
 class Projects(unittest.TestCase):

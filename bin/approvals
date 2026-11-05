@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """approvals: an agent's body hits a permission wall and asks; the owner says yes or no on loom's page.
 
-    approvals request --kind KIND --target TARGET --what "…" --why "…" [--minutes N]
+    approvals request --kind KIND --target TARGET --ask "…" --why "…" --if-yes "…" --if-no "…"
+                      [--details "…"] [--what "…"] [--minutes N]
+                                --ask is the one plain question the owner reads (≤140, no ids, hashes, round
+                                numbers or lane words); --why one line; --if-yes/--if-no what happens either way;
+                                --details longer text for the sheet. --what alone (the old form) still works, and
+                                its card says "(no plain question given)" so the caller gets fixed.
     approvals check ID          pending | allowed | denied | used | expired
     approvals use ID --kind KIND --target TARGET
                                 spend an allowed approval: once, for exactly that kind and target
@@ -264,7 +269,10 @@ def spender(who):
     return (who.get("agent"), place, m.group(1) if m else None)
 
 
-def request(caller, kind, target, what, why, minutes=None, acting_for=False):
+DETAILS_MAX = 1000
+
+
+def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None):
     who = who_of(caller)
     if not KIND.match(kind or ""):
         raise ValueError("--kind is the wall it hit, like github-write or relay")
@@ -278,15 +286,38 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False):
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
         if len(plain(text, 10**6)) > n:
             raise ValueError(f"{label} is {n} characters at most as shown on the card; say it shorter")
-    what, why = plain(what, WORDS_MAX), plain(why, WORDS_MAX)
+    words = {}
+    if ask:
+        # The plain ask (the card's headline), with what happens either way: checked like a task's ask.
+        words = {"ask": unicodedata.normalize("NFKC", str(ask)).strip(), "why": unicodedata.normalize("NFKC", str(why or "")).strip(),
+                 "if_yes": unicodedata.normalize("NFKC", str(if_yes or "")).strip(), "if_no": unicodedata.normalize("NFKC", str(if_no or "")).strip()}
+        check_plain(words)
+        words = {k: plain(v, 10**6) for k, v in words.items()}
+        # Checked as shown: words that are only markup or control characters leave nothing to read.
+        if not all(words[k] for k in ("ask", "why", "if_yes", "if_no")):
+            raise ValueError("with --ask, say --why, --if-yes and --if-no too, in words: the owner reads what happens either way beside Allow and Deny")
+        if details:
+            d = unicodedata.normalize("NFKC", str(details)).replace("\r", "")
+            if len(d) > DETAILS_MAX:
+                raise ValueError(f"--details is {DETAILS_MAX} characters at most")
+            words["details"] = "".join(c for c in d if c == "\n" or unicodedata.category(c)[0] != "C").strip()
+        what = plain(what, WORDS_MAX) or words["ask"]
+        why = words["why"]
+    else:
+        what, why = plain(what, WORDS_MAX), plain(why, WORDS_MAX)
     if not target or not what or not why:
-        raise ValueError("say exactly what (--target), the action (--what) and why (--why): the owner reads them to decide")
+        raise ValueError("say exactly what (--target), the plain question (--ask, with --why, --if-yes and --if-no) "
+                         "and why: the owner reads them to decide")
     mins = DEFAULT_MIN if not minutes else max(1, min(int(minutes), MAX_MIN))
     with Store() as s:
         # Asking again for the same thing is the same card.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
             if a["kind"] == kind and a["target"] == target and a["who"] == who and state_of(a) in ("pending", "allowed"):
+                # A caller that now says it plainly: a pending card takes the plain words (the owner hasn't read it yet).
+                if words and state_of(a) == "pending" and not a.get("ask"):
+                    a.update({k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v}, why=why)
+                    s.save()
                 # An allowed one counts only if the owner hasn't said no to this exact thing since.
                 if state_of(a) == "allowed" and last and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
                     continue
@@ -298,6 +329,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False):
         if granted:
             return {**granted[0], "state": state_of(granted[0])}
         a = {"id": "a-" + secrets.token_hex(4), "kind": kind, "target": target, "what": what, "why": why,
+             **{k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v},
              "who": who, "minutes": mins, "at": iso(now()), "state": "pending"}
         s.d["approvals"][a["id"]] = a
         s.save()
@@ -370,6 +402,68 @@ def answer(aid, action, by=None, minutes=None):
 def recent():
     with Store() as s:
         return sorted(({**a, "state": state_of(a)} for a in s.d["approvals"].values()), key=lambda a: a["at"], reverse=True)
+
+
+# ---------------------------------------------------------------- plain words (taskstore's lint, src/plain.ts)
+
+# The same rules taskstore applies to a task's title and ask (sleepunit-agents/taskstore src/plain.ts, spec
+# taskstore-core it_ts-plain), so an approval's card reads as plainly as a task's: the ask is a headline (no ids of
+# any kind); why and the if-lines may name a pull request or a task, never an internal id, a hash or lane words.
+PLAIN_LIMITS = {"ask": 140, "why": 240, "if_yes": 200, "if_no": 200}
+PLAIN_STRICT = {"ask"}
+PLAIN_FLAG = {"ask": "--ask", "why": "--why", "if_yes": "--if-yes", "if_no": "--if-no"}
+PLAIN_RULES = [
+    ("a task id", re.compile(r"\bt-\d+\b"), True),
+    ("a pull request or issue id", re.compile(r"(?<![\w./-])(?:[\w.-]+/)?[\w.-]+#\d+\b"), True),
+    ("an internal id", re.compile(r"\b(?:a-[0-9a-f]{8}|cv-[0-9a-f]{6,}|dg-[0-9a-f]{6,}|w-[0-9a-f]{6,}|r-\d{3,}|h-\d+)\b", re.I), False),
+    ("a hex id", re.compile(r"(?<![\w-])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{6,40}\b", re.I), False),
+    # Past taskstore's rule: a hash longer than a commit's (a sha256) is an id too.
+    ("a hex id", re.compile(r"(?<![\w-])[0-9a-f]{41,}\b", re.I), False),
+    ("a round number", re.compile(r"\bround\s+\d+\b", re.I), False),
+    ("a lane or wake word", re.compile(r"\b(?:nudge[- ]watch|chain[- ]check|local[- ]wake|plan[- ]night|wake (?:in|at|park|relay|list))\b", re.I), False),
+    ("a raw site or unit code", re.compile(r"\b[A-Z]{1,2}\d{2,4}\b"), False),
+]
+PLAIN_TAG = re.compile(r"^([\w.-]+):\s")
+
+
+def plain_findings(field, value):
+    """What in `value` a person can't read, as (what, text) pairs: taskstore's lintField, rule for rule."""
+    out, seen = [], set()
+
+    def add(what, text):
+        if text not in seen:
+            seen.add(text)
+            out.append((what, text))
+    strict = field in PLAIN_STRICT
+    if strict:
+        m = PLAIN_TAG.match(value)
+        if m:
+            add("a leading tag", m.group(1) + ":")
+    for what, rx, strict_only in PLAIN_RULES:
+        if strict_only and not strict:
+            continue
+        for m in rx.finditer(value):
+            add(what, m.group(0))
+    if len(value) > PLAIN_LIMITS[field]:
+        add(f"over {PLAIN_LIMITS[field]} characters", f"{len(value)} characters")
+    if re.search(r"[\r\n]", value):
+        add("more than one line", "a line break")
+    return out
+
+
+PLAIN_EXAMPLE = ('approvals request --kind gh-guard --target "…" \\\n'
+                 '  --ask "A change to Art\'s sync script landed. OK to start updating lane prompts on loom again?" \\\n'
+                 '  --why "The script that copies lane prompts to loom changed, so it stopped until you look." \\\n'
+                 '  --if-yes "Lane prompt changes go live again." --if-no "Lane prompts stay as they are until you look."')
+
+
+def check_plain(fields):
+    """Refuse an ask that doesn't read plainly, saying exactly what and how to say it instead."""
+    bad = [f"{PLAIN_FLAG[f]} can't have {json.dumps(t)} ({w})" for f in ("ask", "why", "if_yes", "if_no")
+           if fields.get(f) for w, t in plain_findings(f, fields[f])]
+    if bad:
+        raise ValueError("the card is what the owner reads to decide, so it says it in plain words (ids and the "
+                         "exact target go in --target and --details): " + "; ".join(bad) + ". For example:\n" + PLAIN_EXAMPLE)
 
 
 # ---------------------------------------------------------------- standing rules
@@ -692,6 +786,19 @@ def notice_of(n):
             "at": n["at"], "agent": n.get("agent"), "page": ""}
 
 
+NO_ASK = "(no plain question given)"
+
+
+def headline(a):
+    """The card's headline: the plain ask, whole; an old-style request reads as itself, marked, so it gets fixed."""
+    return a["ask"] if a.get("ask") else f"{NO_ASK} {cap(what_of(a))}"
+
+
+def fine_print(a):
+    """Exactly what Allow allows: the kind and target (machine fields), where it was asked from, for how long."""
+    return f"{kind_of(a)}, {from_of(a)}. Allowing it lets that one action through once, within {a['minutes']} min."
+
+
 def ui_manifest():
     rows = recent()
     pending = [a for a in rows if a["state"] == "pending"][:10]
@@ -700,13 +807,18 @@ def ui_manifest():
     # The tab makes the page real: without it loom serves no /p/approvals, and the asks' and answered rows' links led
     # nowhere. Visited rarely, so it sits under Setup.
     return {"v": 2, "tab": {"label": "Approvals", "kind": "setting", "icon": "stamp"}, "asks": [{
-        "text": f"{name_of(a['who']['agent'])} asks: {what_of(a)}",
-        "meta": meta_of(a),
+        "text": headline(a),
+        "meta": a["why"] if a.get("ask") else meta_of(a),
+        # The structured ask (loom's Inbox and Home show these whole, Allow beside "If you allow", Deny beside "If you
+        # deny"); fine is the small print under "Exactly what this allows".
+        **({"why": a["why"], "if_yes": a["if_yes"], "if_no": a["if_no"]} if a.get("ask") else {}),
+        **({"details": a["details"]} if a.get("details") else {}),
+        "fine": fine_print(a),
         "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
         "actions": [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}},
                     {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}],
     } for a in pending], "answered": [{
-        "text": f"{name_of(a['who']['agent'])} asked: {what_of(a)}"[:300],
+        "text": (a["ask"] if a.get("ask") else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
         "outcome": OUTCOME[a["state"]] + (f" ({'Allowed' if a['state'] != 'denied' else 'Denied'} by {a['by']}.)" if a.get("by") else ""),
         "at": a.get("used") or a.get("decided") or a["at"], "kind": "permission", "agent": a["who"]["agent"], "page": "",
     } for a in done], "notices": [notice_of(n) for n in notices()[:20]]}
@@ -820,13 +932,16 @@ def ui_page(req):
     if pending:
         # Each waiting approval: what it would do, and why, in words; Allow once and Deny in its sheet.
         sections.append({"id": "waiting", "title": "Waiting on you", "tone": "warn", "blocks": [{"type": "panel", "rows": [{
-            "label": f"{name_of(a['who']['agent'])} asks: {kind_of(a)}", "agent": a["who"]["agent"], "tone": "warn",
-            "value": cap(what_of(a)), "detail": f"“{a['why']}” · {ago(a['at'])}",
+            "label": headline(a), "agent": a["who"]["agent"], "tone": "warn",
+            "value": a["why"], "detail": f"{name_of(a['who']['agent'])} · {ago(a['at'])}",
             "sheet": {"title": f"{name_of(a['who']['agent'])} asks", "blocks": [
-                {"type": "text", "text": cap(what_of(a))},
-                {"type": "text", "tone": "muted", "text": f"{kind_of(a)}, {from_of(a)}, {ago(a['at'])}. “{a['why']}”"},
-                {"type": "text", "tone": "muted", "text": f"Allowing it lets that one action through once, within {a['minutes']} min."},
+                {"type": "text", "text": headline(a)},
+                {"type": "text", "text": a["why"]},
+                *([{"type": "kv", "items": [{"label": "If you allow", "value": a["if_yes"]}, {"label": "If you deny", "value": a["if_no"]}]}]
+                  if a.get("if_yes") else []),
                 {"type": "buttons", "items": answers_of(a, cards if owner else None)},
+                *([{"type": "text", "text": a["details"]}] if a.get("details") else []),
+                {"type": "details", "summary": "Exactly what this allows", "blocks": [{"type": "text", "tone": "muted", "text": fine_print(a)}]},
             ]},
         } for a in pending[:20]]}]})
     else:
@@ -836,7 +951,7 @@ def ui_page(req):
         sections.append(rules_section(cards))
     if past:
         sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
-            "text": f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
+            "text": a.get("ask") or f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
             "tone": {"denied": "bad", "expired": "muted"}.get(a["state"]),
         } for a in past]}]})
     if rows:
@@ -972,7 +1087,7 @@ def api_answer(req):
     if caller.get("kind") != "agent":
         return refuse(403, "only an agent's bodies ask here; the owner answers on the page")
     argv = (req.get("body") or {}).get("argv")
-    if not isinstance(argv, list) or not 1 <= len(argv) <= 14 or not all(isinstance(a, str) and len(a) <= 600 for a in argv):
+    if not isinstance(argv, list) or not 1 <= len(argv) <= 24 or not all(isinstance(a, str) and len(a) <= 1100 for a in argv):
         return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID | use ID --kind K --target T"
                            " | rule merge TARGET | tell --kind merge --target TARGET --what W")
     try:
@@ -987,8 +1102,10 @@ def run(argv, caller=None):
     ap = argparse.ArgumentParser(prog="approvals", add_help=False, exit_on_error=False)
     sub = ap.add_subparsers(dest="cmd")
     r = sub.add_parser("request", add_help=False, exit_on_error=False)
-    for f in ("--kind", "--target", "--what", "--why", "--minutes"):
+    for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details"):
         r.add_argument(f, default="")
+    r.add_argument("--if-yes", dest="if_yes", default="")
+    r.add_argument("--if-no", dest="if_no", default="")
     r.add_argument("--as", dest="as_", default="")
     sub.add_parser("check", add_help=False, exit_on_error=False).add_argument("id")
     u = sub.add_parser("use", add_help=False, exit_on_error=False)
@@ -1025,7 +1142,8 @@ def run(argv, caller=None):
             raise ValueError("--as is the caller's JSON") from None
     if a.cmd == "request":
         x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None,
-                    acting_for=bool(a.as_))
+                    acting_for=bool(a.as_), ask=a.ask or None, if_yes=a.if_yes or None, if_no=a.if_no or None,
+                    details=a.details or None)
         if x["state"] == "denied":
             return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
         if x["state"] == "allowed":
