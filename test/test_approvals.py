@@ -315,6 +315,7 @@ SHA2 = "b" * 40
 T = f"github:acme/app#12@{SHA}"
 CARDS = [{"slug": "pond", "name": "Pond", "repos": ["github:acme/pond", "github:acme/pond-ui"]}]
 OWNER = {"kind": "owner", "who": "jonathan-barket", "agents": "*"}
+HOUSE_WHO = {"agent": "ada", "where": "h-7"}
 
 
 class Rules(unittest.TestCase):
@@ -472,6 +473,60 @@ class Rules(unittest.TestCase):
         self.assertEqual(d[T], {"tier": "do", "scope": "github:acme/*"})
         self.assertEqual((d[t2]["tier"], d[t2]["approval"]["state"]), ("ask", "allowed"))
         self.assertEqual(self.api(["rule", "merge", T, "--for", "ada"])["exit"], 1)
+
+    def test_a_target_with_a_pattern_in_it_is_refused_and_never_becomes_a_wildcard_rule(self):
+        for bad in ("github:onterris/*#1@abc", f"github:onterris/*#1@{SHA}", f"github:onterris/a?b#1@{SHA}",
+                    f"github:onterris/[ab]#1@{SHA}", f"github:onterris#1@{SHA}", f"github:a/b c#1@{SHA}"):
+            r = self.api(["request", "--kind", "merge", "--target", bad, "--what", "merge it", "--why", "green"])
+            self.assertEqual(r["exit"], 1, bad)
+            self.assertIn("literal", r["stderr"], bad)
+            with self.assertRaises(ValueError):
+                ap.run(["grant", "--kind", "merge", "--target", bad, "--for", "ada"])
+        # A record that somehow holds one (an older store, a hand edit) still can't become a rule.
+        with ap.Store() as st:
+            st.d["approvals"]["a-0000beef"] = {"id": "a-0000beef", "kind": "merge", "target": f"github:onterris/*#1@{SHA}",
+                                               "what": "x", "why": "y", "who": HOUSE_WHO, "minutes": 60, "at": ap.iso(ap.now()),
+                                               "state": "pending"}
+            st.save()
+        self.assertIsNone(ap.always_scope(ap.get("a-0000beef"), CARDS))
+        r = ap.ui_act({"action": "always", "caller": OWNER, "fields": {"id": "a-0000beef"}})
+        self.assertFalse(r["ok"])
+        self.assertEqual(ap.get("a-0000beef")["state"], "pending")
+        with ap.Store() as st:
+            self.assertFalse(any("*" in x["scope"] for x in st.rules()))
+        # The literal forms each forge needs are accepted.
+        for good in (T, f"forgejo:codeberg.org/acme/app#3@{SHA}", f"azure:org/proj/repo.x_y-z#9@{SHA}"):
+            self.assertIsNotNone(ap.repo_of(good), good)
+
+    def test_a_deny_stops_an_earlier_allow(self):
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green"])
+        aid = r["stdout"].split(":")[0]
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        # Then the owner says Not yet for the same target (the Changes piece's grant --deny).
+        ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jo", "--deny"])
+        self.assertEqual(ap.get(aid)["state"], "denied")
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", T])["exit"], 1)
+        # Asking again finds the no, not the old yes.
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green"])
+        self.assertIn("not yet", r["stdout"])
+        # A deny on the card does the same to an earlier grant.
+        t2 = f"github:acme/app#13@{SHA}"
+        g = ap.run(["grant", "--kind", "merge", "--target", t2, "--for", "ada"]).split(":")[0]
+        p = self.api(["request", "--kind", "merge", "--target", t2, "--what", "merge it", "--why", "green"])
+        self.assertEqual(p["stdout"].split(":")[0], g)
+        with ap.Store() as st:     # a pending one beside it (an older house's), then the owner denies it
+            st.d["approvals"]["a-0000cafe"] = {"id": "a-0000cafe", "kind": "merge", "target": t2, "what": "x", "why": "y",
+                                               "who": HOUSE_WHO, "minutes": 60, "at": ap.iso(ap.now()), "state": "pending"}
+            st.save()
+        ap.ui_act({"action": "deny", "fields": {"id": "a-0000cafe"}})
+        self.assertEqual(ap.get(g)["state"], "denied")
+        self.assertEqual(self.api(["use", g, "--kind", "merge", "--target", t2])["exit"], 1)
+        # A later yes counts again.
+        g2 = ap.run(["grant", "--kind", "merge", "--target", t2, "--for", "ada"]).split(":")[0]
+        with ap.Store() as st:     # decided a second after the deny
+            st.d["approvals"][g2]["decided"] = "2999-01-01T00:00:00Z"
+            st.save()
+        self.assertEqual(self.api(["use", g2, "--kind", "merge", "--target", t2])["exit"], 0)
 
     def test_rules_show_in_words(self):
         self.rules(("github:onterris/*", "ask"), ("project:pond", "do"), ("github:acme/app", "tell"))

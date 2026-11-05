@@ -104,8 +104,15 @@ GRANT_MIN = 24 * 60          # an owner's grant (approvals grant) lasts a day: i
 NOTICES_KEEP = 50
 # A merge approval's target: one change at one head (loom docs/specs/changes.md, "Ids").
 FORGE = r"[a-z][a-z0-9-]{0,23}"
-LOCATOR = r"[\x21-\x22\x24-\x3f\x41-\x7e]{1,160}"     # printable ASCII but space, # and @
-MERGE_TARGET = re.compile(rf"^({FORGE}):({LOCATOR})#([1-9][0-9]{{0,9}})@([0-9a-f]{{40}})$")
+# A merge target is literal: a body chooses it, and Always turns its repo into a rule, so nothing in it may read as a
+# pattern. Segments are [A-Za-z0-9._-]; two to four of them (github owner/repo, forgejo host/owner/repo, azure
+# org/project/repo), 120 characters at most.
+SEGMENT = r"[A-Za-z0-9._-]+"
+LITERAL_LOCATOR = rf"{SEGMENT}(?:/{SEGMENT}){{1,3}}"
+MERGE_TARGET = re.compile(rf"^({FORGE}):({LITERAL_LOCATOR})#([1-9][0-9]{{0,9}})@([0-9a-f]{{40}})$")
+LOCATOR_MAX = 120
+LOCATOR = r"[\x21-\x22\x24-\x3f\x41-\x7e]{1,120}"     # a rule's pattern (the owner's): printable ASCII but space, # and @
+PATTERN_CHARS = set("*?[]{}!\\")
 TIERS = ("do", "tell", "ask")
 RULE_KINDS = ("merge",)
 RULES_MAX = 100
@@ -199,6 +206,25 @@ class Store:
         self.lock.close()
 
 
+def newest_decision(rows, kind, target, agent):
+    """The owner's newest answer for this kind, target and agent: the approval decided last, or None."""
+    done = [a for a in rows if a["kind"] == kind and a["target"] == target and a["who"].get("agent") == agent and a.get("decided")]
+    return max(done, key=lambda a: a["decided"], default=None)
+
+
+def deny_siblings(s, kind, target, agent, keep, by=None):
+    """A deny stops every earlier yes: each unspent pending or allowed approval for the same kind, target and agent
+    is denied too, and logged."""
+    for a in s.d["approvals"].values():
+        if a["id"] != keep and a["kind"] == kind and a["target"] == target and a["who"].get("agent") == agent \
+                and state_of(a) in ("pending", "allowed"):
+            a["state"], a["decided"], a["superseded_by"] = "denied", iso(now()), keep
+            a.pop("expires", None)
+            if by:
+                a["by"] = by
+            s.log("deny-superseded", a, by_deny=keep)
+
+
 def state_of(a, t=None):
     t = t or now()
     if a["state"] == "allowed" and a.get("expires") and datetime.strptime(a["expires"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) <= t:
@@ -235,6 +261,8 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False):
     if kind in PIECE_KINDS and not acting_for:
         raise PermissionError(f"a {kind} approval is filed by the piece on loom's machine for its body (--as), not by a body")
     target = exact_target(target)
+    if kind == "merge" and not repo_of(target):
+        raise ValueError("a merge target is literal: <forge>:<owner>/<repo>#<n>@<40-hex head>, letters, digits, . _ - only")
     # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
     # are refused, never cut, so nothing can hide past the part the owner reads.
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
@@ -246,8 +274,12 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False):
     mins = DEFAULT_MIN if not minutes else max(1, min(int(minutes), MAX_MIN))
     with Store() as s:
         # Asking again for the same thing is the same card.
+        last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
             if a["kind"] == kind and a["target"] == target and a["who"] == who and state_of(a) in ("pending", "allowed"):
+                # An allowed one counts only if the owner hasn't said no to this exact thing since.
+                if state_of(a) == "allowed" and last and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
+                    continue
                 return a
         # The owner answered this exact target already (approvals grant): that's the answer, newest first.
         granted = sorted((a for a in s.d["approvals"].values() if a.get("granted") and a["kind"] == kind
@@ -285,6 +317,10 @@ def use(caller, aid, kind, target):
         if a["kind"] != kind or a["target"] != target:
             s.log("refused-use", a, kind_used=kind, target_used=target)
             raise PermissionError(f"{aid} allows {a['kind']} for {a['target']}, not {kind} for {target}")
+        last = newest_decision(s.d["approvals"].values(), kind, target, a["who"].get("agent"))
+        if last and last["id"] != aid and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
+            s.log("refused-use", a, denied_by=last["id"])
+            raise PermissionError(f"{aid} was overruled: the owner said no to {target} after ({last['id']})")
         # The agent that asked spends it, from any of its houses: the house that asked is
         # usually gone by the time the owner answers, hours later, and the agent's next house
         # is the one that carries on. The action itself is pinned by kind and target.
@@ -314,6 +350,8 @@ def answer(aid, action, by=None, minutes=None):
             a["by"] = by
         if action == "allow":
             a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + (minutes or a["minutes"]) * 60, timezone.utc))
+        else:
+            deny_siblings(s, a["kind"], a["target"], a["who"].get("agent"), a["id"], by)
         s.save()
         s.log(action, a)
         return a
@@ -357,7 +395,7 @@ def make_rule(kind, scope, tier, by):
 def repo_of(target):
     """A merge target's repo id (github:acme/app), its change number and head, or None."""
     m = MERGE_TARGET.match(str(target or ""))
-    if not m:
+    if not m or len(m.group(2)) > LOCATOR_MAX:
         return None
     return {"repo": f"{m.group(1)}:{m.group(2).lower()}", "forge": m.group(1), "locator": m.group(2).lower(),
             "number": int(m.group(3)), "head": m.group(4)}
@@ -502,6 +540,8 @@ def grant(kind, target, agent, by, deny=False):
             a["by"] = by
         if not deny:
             a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + GRANT_MIN * 60, timezone.utc))
+        else:
+            deny_siblings(s, kind, target, agent, a["id"], by)
         s.d["approvals"][a["id"]] = a
         s.save()
         s.log("grant" if not deny else "grant-deny", a)
@@ -657,8 +697,8 @@ def always_scope(a, cards):
     """For a pending merge approval: the scope Always would set, and its words. The project that names the repo
     (the first, in loom's order), else the exact repo."""
     r = repo_of(a.get("target"))
-    if a.get("kind") != "merge" or not r:
-        return None
+    if a.get("kind") != "merge" or not r or PATTERN_CHARS & set(r["repo"]):
+        return None        # never a pattern from a body's target: refused, not escaped
     for c in cards or []:
         if r["repo"] in c["repos"]:
             return f"project:{c['slug']}", f"Always for {c['name']}"
