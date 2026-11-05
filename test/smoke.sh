@@ -31,6 +31,13 @@ echo '{"caller":{"kind":"agent","agent":"agent","house":"h-1"},"path":"run","bod
 echo '{"caller":{"kind":"owner"},"path":"run","body":{"argv":["list"]}}' | run api --json | grep -q '"status": 403' || fail "api lets the owner in"
 echo '{"path":""}' | run ui page --json | grep -q '"title": "Approvals"' || fail "page"
 
+sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+[ "$(run rule merge "github:acme/app#1@$sha")" = ask ] || fail "no rule should ask"
+g=$(run grant --kind merge --target "github:acme/app#1@$sha" --for agent --by owner)
+gid=${g%%:*}
+[ "$(run rule merge "github:acme/app#1@$sha")" = "ask allowed $gid" ] || fail "the grant isn't what rule reads"
+run use "$gid" --kind merge --target "github:acme/app#1@$sha" | grep -q used || fail "spend the grant"
+
 [ -f "$tmp/piece/data/approvals.json" ] || fail "the store isn't under the piece home"
 [ ! -e "$tmp/home/.local/state/loom-approvals" ] || fail "wrote outside the piece home"
 echo "smoke: ok ($id asked, allowed, spent once; store in \$LOOM_PIECE_HOME/data)"
