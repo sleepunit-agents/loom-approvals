@@ -2,7 +2,7 @@
   "name": "loom-approvals",
   "version": "0.1.0",
   "private": true,
-  "description": "loom's approvals piece: a body that hits a permission wall asks, the owner allows it once on loom's page, and the approval is spent by exactly the action it names",
+  "description": "loom's approvals piece: a body that hits a permission wall asks, the owner allows it once on loom's page, and the approval is spent by exactly the action it names; standing rules say which merges need asking at all",
   "bin": {
     "loom-approvals": "bin/approvals",
     "approvals": "bin/approvals"
@@ -20,7 +20,7 @@
     "name": "approvals",
     "role": "approvals",
     "label": "Approvals",
-    "description": "Single-use approvals: a body asks for one action, the owner allows or denies it on loom's Home, and it's spent once by exactly that action.",
+    "description": "Single-use approvals, and standing rules for merging: a body asks for one action, the owner allows or denies it on loom's Home, and it's spent once by exactly that action.",
     "settings": [
       {
         "name": "APPROVALS_DIR",
@@ -37,6 +37,17 @@
         "name": "APPROVALS_KINDS",
         "label": "Words for kinds of approval",
         "hint": "JSON, like {\"github-write\": \"A GitHub write\"}; a kind not named is shown as its own words"
+      },
+      {
+        "name": "APPROVALS_SEED_RULES",
+        "label": "Standing rules to start with",
+        "hint": "JSON, like [{\"kind\": \"merge\", \"scope\": \"github:acme/*\", \"tier\": \"do\"}]; written once, when there are no rules yet"
+      },
+      {
+        "name": "APPROVALS_PROJECTS",
+        "label": "How to list projects",
+        "hint": "the command that prints project cards as JSON, for project rules",
+        "default": "loom project list --json"
       }
     ]
   }

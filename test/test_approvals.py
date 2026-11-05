@@ -309,5 +309,289 @@ class Home(unittest.TestCase):
             self.assertEqual((m.STATE, m.LOCAL_AGENT), (home / "data", "zed"))
 
 
+
+SHA = "a" * 40
+SHA2 = "b" * 40
+T = f"github:acme/app#12@{SHA}"
+CARDS = [{"slug": "pond", "name": "Pond", "repos": ["github:acme/pond", "github:acme/pond-ui"]}]
+OWNER = {"kind": "owner", "who": "jonathan-barket", "agents": "*"}
+HOUSE_WHO = {"agent": "ada", "where": "h-7"}
+
+
+class Rules(unittest.TestCase):
+    """Standing rules (loom docs/specs/changes.md): the owner's lasting answer for merging."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.patches = [mock.patch.object(ap, "STATE", Path(self.td.name)),
+                        mock.patch.object(ap, "projects", lambda: CARDS)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.td.cleanup()
+
+    def api(self, argv, caller=HOUSE):
+        return ap.api_answer({"caller": caller, "path": "run", "body": {"argv": argv}})["body"]
+
+    def rules(self, *rows):
+        with ap.Store() as s:
+            s.rules()
+            s.replace_rules([ap.make_rule("merge", sc, t, "test") for sc, t in rows])
+
+    def test_most_specific_wins_then_strictest(self):
+        rules = [ap.make_rule("merge", sc, t, "x") for sc, t in [
+            ("github:acme/*", "do"), ("project:pond", "ask"), ("github:acme/pond-*", "tell"), ("github:acme/pond", "tell")]]
+        tier = lambda t, cards=CARDS: ap.resolve(rules, "merge", t, cards)[0]
+        self.assertEqual(tier(f"github:acme/pond#1@{SHA}"), "tell", "the exact repo wins over its project")
+        self.assertEqual(tier(f"github:acme/pond-ui#1@{SHA}"), "ask", "a project wins over a pattern")
+        self.assertEqual(tier(f"github:acme/pond-x#1@{SHA}"), "tell", "fewer * wins")
+        self.assertEqual(tier(f"github:acme/other#1@{SHA}"), "do")
+        self.assertEqual(tier(f"github:ACME/Other#1@{SHA}"), "do", "case doesn't matter")
+        self.assertEqual(tier(f"github:else/app#1@{SHA}"), "ask", "no rule: ask")
+        self.assertEqual(tier(f"forgejo:acme/app#1@{SHA}"), "ask", "another forge isn't github's pattern")
+        self.assertEqual(tier(f"github:acme/sub/deep#1@{SHA}"), "ask", "* stays inside one segment")
+        tie = [ap.make_rule("merge", "github:acme/*", "do", "x"), ap.make_rule("merge", "github:*/app", "tell", "x")]
+        self.assertEqual(ap.resolve(tie, "merge", T)[0], "tell", "a tie goes to the stricter")
+        # The project list unreadable: no project rule applies, and the answer says so.
+        t, _, note = ap.resolve(rules, "merge", f"github:acme/pond-ui#1@{SHA}", None)
+        self.assertEqual(t, "tell")
+        self.assertIn("project list", note)
+        with self.assertRaises(ValueError):
+            ap.resolve(rules, "merge", "github:acme/app#12")       # no head
+
+    def test_the_seed_is_written_once_and_only_when_there_are_none(self):
+        seed = json.dumps([{"kind": "merge", "scope": "github:sleepunit-agents/*", "tier": "do"},
+                           {"kind": "merge", "scope": "github:onterris/*", "tier": "ask"}])
+        with mock.patch.dict(os.environ, {"APPROVALS_SEED_RULES": seed}):
+            self.assertEqual(self.api(["rule", "merge", f"github:sleepunit-agents/loom#5@{SHA}"])["stdout"], "do\n")
+            self.assertEqual(self.api(["rule", "merge", f"github:onterris/on-pond#5@{SHA}"])["stdout"], "ask\n")
+            self.assertTrue(ap.ui_act({"action": "rule", "caller": OWNER,
+                                       "fields": {"scope": "github:sleepunit-agents/*", "kind": "merge", "tier": "none"}})["ok"])
+            # Removed stays removed: the seed isn't written again.
+            self.assertEqual(self.api(["rule", "merge", f"github:sleepunit-agents/loom#5@{SHA}"])["stdout"], "ask\n")
+        rules = json.loads((Path(self.td.name) / "rules.json").read_text())["rules"]
+        self.assertEqual([(r["scope"], r["by"]) for r in rules], [("github:onterris/*", "seed")])
+        self.assertEqual((Path(self.td.name) / "rules.json").stat().st_mode & 0o777, 0o600)
+
+    def test_rule_says_the_newest_approval_for_that_exact_target(self):
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], "ask\n")
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge acme/app#12", "--why", "CI green"])
+        aid = r["stdout"].split(":")[0]
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], f"ask pending {aid}\n")
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], f"ask allowed {aid}\n")
+        self.assertEqual(self.api(["rule", "merge", f"github:acme/app#12@{SHA2}"])["stdout"], "ask\n", "another head")
+        self.assertEqual(self.api(["rule", "merge", "github:acme/app#12"])["exit"], 1)
+        self.rules(("github:acme/app", "do"))
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], "do\n")
+
+    def test_grant_is_spent_once_by_that_agent_from_anywhere_for_that_target_for_a_day(self):
+        self.assertIn("allowed", ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jonathan-barket"]))
+        # The agent's request finds the owner's answer; its rule check says so.
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green"])
+        self.assertIn("already allowed", r["stdout"])
+        aid = r["stdout"].split(":")[0]
+        a = ap.get(aid)
+        self.assertEqual(a["by"], "jonathan-barket")
+        hours = (ap.datetime.strptime(a["expires"], "%Y-%m-%dT%H:%M:%SZ") - ap.datetime.strptime(a["decided"], "%Y-%m-%dT%H:%M:%SZ")).total_seconds() / 3600
+        self.assertEqual(hours, 24)
+        # Not another agent; not another head (a push invalidates it); then the agent, once, from another house.
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", T], {"kind": "agent", "agent": "bo", "house": "h-2"})["exit"], 1)
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", f"github:acme/app#12@{SHA2}"])["exit"], 1)
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", T], {"kind": "agent", "agent": "ada", "house": "h-99"})["exit"], 0)
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", T])["exit"], 1, "once")
+
+    def test_grant_answers_a_pending_request_instead_of_making_a_second(self):
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green"])
+        aid = r["stdout"].split(":")[0]
+        out = ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jonathan-barket", "--deny"])
+        self.assertEqual(out, f"{aid}: denied\n")
+        self.assertEqual(len(ap.recent()), 1)
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], f"ask denied {aid}\n")
+
+    def test_grant_is_refused_over_the_api_and_for_anything_but_a_merge_target(self):
+        self.assertEqual(self.api(["grant", "--kind", "merge", "--target", T, "--for", "ada"])["exit"], 1)
+        with self.assertRaises(ValueError):
+            ap.run(["grant", "--kind", "relay", "--target", "a->b", "--for", "ada"])
+        with self.assertRaises(ValueError):
+            ap.run(["grant", "--kind", "merge", "--target", "github:acme/app#12", "--for", "ada"])
+        with mock.patch.dict(os.environ, {"HOUSE_ID": "h-1"}), mock.patch.object(ap, "forward", side_effect=SystemExit(9)) as fw:
+            with mock.patch.object(ap.sys, "argv", ["approvals", "grant", "--kind", "merge", "--target", T, "--for", "ada"]):
+                with self.assertRaises(SystemExit):
+                    ap.main()
+            fw.assert_called_once()          # in a house it's forwarded, so it arrives as a body's call and is refused
+
+    def test_rules_are_the_owners_and_the_api_has_no_way_to_change_one(self):
+        member = {"kind": "owner", "who": "sam", "agents": ["ada"]}
+        for c in (member, {"kind": "agent", "agent": "ada"}):
+            r = ap.ui_act({"action": "rule", "caller": c, "fields": {"scope": "github:acme/*", "kind": "merge", "tier": "do"}})
+            self.assertFalse(r["ok"])
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], "ask\n")
+        for argv in (["rule", "set", "github:acme/*", "do"], ["rule-add"], ["rules"]):
+            self.assertEqual(self.api(argv)["exit"], 1)
+        self.assertEqual(ap.api_answer({"caller": OWNER, "path": "rule", "body": {}})["status"], 404)
+        ok = ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "GitHub:Acme/*", "tier": "do"}})
+        self.assertFalse(ok["ok"], "the forge is lowercase")
+        ok = ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "github:Acme/*", "tier": "do"}})
+        self.assertTrue(ok["ok"], ok)
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], "do\n")
+        # The page shows them to the owner only.
+        self.assertIn("rules", [x["id"] for x in ap.ui_page({"path": "", "caller": OWNER})["sections"]])
+        self.assertNotIn("rules", [x["id"] for x in ap.ui_page({"path": "", "caller": member})["sections"]])
+
+    def test_always_sets_the_projects_rule_and_allows_it_in_one_go(self):
+        t = f"github:acme/pond-ui#3@{SHA}"
+        aid = self.api(["request", "--kind", "merge", "--target", t, "--what", "merge pond-ui#3", "--why", "green"])["stdout"].split(":")[0]
+        sheet = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]
+        labels = [b["label"] for b in sheet["blocks"][-1]["items"]]
+        self.assertEqual(labels, ["Allow once", "Always for Pond", "Deny"])
+        r = ap.ui_act({"action": "always", "caller": OWNER, "fields": {"id": aid}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        self.assertEqual(self.api(["rule", "merge", f"github:acme/pond#9@{SHA}"])["stdout"], "do\n")
+        # With no project naming the repo, Always is for the repo itself.
+        aid2 = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge app#12", "--why", "green"])["stdout"].split(":")[0]
+        self.assertEqual(ap.always_scope(ap.get(aid2), CARDS), ("github:acme/app", "Always for acme/app"))
+        self.assertFalse(ap.ui_act({"action": "always", "caller": {"kind": "owner", "who": "sam", "agents": ["ada"]}, "fields": {"id": aid2}})["ok"])
+
+    def test_tell_files_a_notice_for_do_or_tell_and_refuses_ask(self):
+        self.rules(("github:acme/*", "tell"))
+        r = self.api(["tell", "--kind", "merge", "--target", T, "--what", "the fix for the login page"])
+        self.assertEqual(r["exit"], 0, r)
+        n = ap.ui_manifest()["notices"][0]
+        self.assertEqual((n["text"], n["meta"], n["agent"]), ("Ada merged acme/app#12", "the fix for the login page", "ada"))
+        self.assertEqual(self.api(["tell", "--kind", "merge", "--target", f"github:else/app#1@{SHA}", "--what", "x"])["exit"], 1)
+
+    def test_rule_answers_many_targets_for_another_agent_only_locally(self):
+        self.rules(("github:acme/*", "do"))
+        t2 = f"github:else/app#2@{SHA}"
+        ap.run(["grant", "--kind", "merge", "--target", t2, "--for", "ada", "--by", "jo"])
+        d = json.loads(ap.run(["rule", "merge", T, t2, "--for", "ada", "--json"])[0])
+        self.assertEqual(d[T], {"tier": "do", "scope": "github:acme/*"})
+        self.assertEqual((d[t2]["tier"], d[t2]["approval"]["state"]), ("ask", "allowed"))
+        self.assertEqual(self.api(["rule", "merge", T, "--for", "ada"])["exit"], 1)
+
+    def test_a_target_with_a_pattern_in_it_is_refused_and_never_becomes_a_wildcard_rule(self):
+        for bad in ("github:onterris/*#1@abc", f"github:onterris/*#1@{SHA}", f"github:onterris/a?b#1@{SHA}",
+                    f"github:onterris/[ab]#1@{SHA}", f"github:onterris#1@{SHA}", f"github:a/b c#1@{SHA}"):
+            r = self.api(["request", "--kind", "merge", "--target", bad, "--what", "merge it", "--why", "green"])
+            self.assertEqual(r["exit"], 1, bad)
+            self.assertIn("literal", r["stderr"], bad)
+            with self.assertRaises(ValueError):
+                ap.run(["grant", "--kind", "merge", "--target", bad, "--for", "ada"])
+        # A record that somehow holds one (an older store, a hand edit) still can't become a rule.
+        with ap.Store() as st:
+            st.d["approvals"]["a-0000beef"] = {"id": "a-0000beef", "kind": "merge", "target": f"github:onterris/*#1@{SHA}",
+                                               "what": "x", "why": "y", "who": HOUSE_WHO, "minutes": 60, "at": ap.iso(ap.now()),
+                                               "state": "pending"}
+            st.save()
+        self.assertIsNone(ap.always_scope(ap.get("a-0000beef"), CARDS))
+        r = ap.ui_act({"action": "always", "caller": OWNER, "fields": {"id": "a-0000beef"}})
+        self.assertFalse(r["ok"])
+        self.assertEqual(ap.get("a-0000beef")["state"], "pending")
+        with ap.Store() as st:
+            self.assertFalse(any("*" in x["scope"] for x in st.rules()))
+        # The literal forms each forge needs are accepted.
+        for good in (T, f"forgejo:codeberg.org/acme/app#3@{SHA}", f"azure:org/proj/repo.x_y-z#9@{SHA}"):
+            self.assertIsNotNone(ap.repo_of(good), good)
+
+    def test_a_deny_stops_an_earlier_allow(self):
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green"])
+        aid = r["stdout"].split(":")[0]
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        # Then the owner says Not yet for the same target (the Changes piece's grant --deny).
+        ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jo", "--deny"])
+        self.assertEqual(ap.get(aid)["state"], "denied")
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", T])["exit"], 1)
+        # Asking again finds the no, not the old yes.
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green"])
+        self.assertIn("not yet", r["stdout"])
+        # A deny on the card does the same to an earlier grant.
+        t2 = f"github:acme/app#13@{SHA}"
+        g = ap.run(["grant", "--kind", "merge", "--target", t2, "--for", "ada"]).split(":")[0]
+        p = self.api(["request", "--kind", "merge", "--target", t2, "--what", "merge it", "--why", "green"])
+        self.assertEqual(p["stdout"].split(":")[0], g)
+        with ap.Store() as st:     # a pending one beside it (an older house's), then the owner denies it
+            st.d["approvals"]["a-0000cafe"] = {"id": "a-0000cafe", "kind": "merge", "target": t2, "what": "x", "why": "y",
+                                               "who": HOUSE_WHO, "minutes": 60, "at": ap.iso(ap.now()), "state": "pending"}
+            st.save()
+        ap.ui_act({"action": "deny", "fields": {"id": "a-0000cafe"}})
+        self.assertEqual(ap.get(g)["state"], "denied")
+        self.assertEqual(self.api(["use", g, "--kind", "merge", "--target", t2])["exit"], 1)
+        # A later yes counts again.
+        g2 = ap.run(["grant", "--kind", "merge", "--target", t2, "--for", "ada"]).split(":")[0]
+        with ap.Store() as st:     # decided a second after the deny
+            st.d["approvals"][g2]["decided"] = "2999-01-01T00:00:00Z"
+            st.save()
+        self.assertEqual(self.api(["use", g2, "--kind", "merge", "--target", t2])["exit"], 0)
+
+    def test_a_project_scope_is_a_slug_and_project_is_no_forge(self):
+        for bad in ("project:Pond", "project:po*nd", "project:foo/bar", "project:"):
+            with self.assertRaises(ValueError, msg=bad):
+                ap.make_rule("merge", bad, "ask", "x")
+        r = ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "project:Pond", "tier": "ask"}})
+        self.assertFalse(r["ok"])
+
+    def test_the_answer_is_for_this_agent_alone(self):
+        ap.run(["grant", "--kind", "merge", "--target", T, "--for", "bo", "--by", "jo"])
+        self.assertEqual(self.api(["rule", "merge", T])["stdout"], "ask\n", "bo's yes is not ada's")
+        d = json.loads(ap.run(["rule", "merge", T, "--for", "ada", "--json"])[0])
+        self.assertNotIn("approval", d[T])
+
+    def test_a_rules_file_that_isnt_rules_asks_and_is_never_overwritten(self):
+        path = Path(self.td.name) / "rules.json"
+        for text in ('{"v":1,"rules":{"a":1}}', '{"v":1,"rules":[{"scope":"github:a/*","tier":"sure","kind":"merge"}]}', "not json"):
+            path.write_text(text)
+            self.assertEqual(self.api(["rule", "merge", f"github:a/b#1@{SHA}"])["stdout"], "ask\n", text)
+            self.assertTrue(ap.ui_page({"path": "", "caller": OWNER})["sections"])
+            r = ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "github:x/*", "tier": "do"}})
+            self.assertFalse(r["ok"], text)
+            self.assertEqual(path.read_text(), text, "an edit never writes over a file it couldn't read")
+
+    def test_a_project_list_that_cant_be_read_says_so_on_stderr(self):
+        self.rules(("project:pond", "ask"), ("github:acme/*", "do"))
+        with mock.patch.object(ap, "projects", lambda: None):
+            r = self.api(["rule", "merge", f"github:acme/pond#1@{SHA}"])
+        self.assertEqual(r["stdout"], "do\n")
+        self.assertIn("project list", r["stderr"])
+
+    def test_tell_refuses_words_it_would_have_to_cut(self):
+        self.rules(("github:acme/*", "tell"))
+        self.assertEqual(self.api(["tell", "--kind", "merge", "--target", T, "--what", "x" * 301])["exit"], 1)
+
+    def test_rules_show_in_words(self):
+        self.rules(("github:onterris/*", "ask"), ("project:pond", "do"), ("github:acme/app", "tell"))
+        page = ap.ui_page({"path": "", "caller": OWNER})
+        rules = next(x for x in page["sections"] if x["id"] == "rules")["blocks"][0]["rows"]
+        self.assertEqual([(r["label"], r["value"]) for r in rules[:-1]],
+                         [("Everything in onterris", "Ask me"), ("acme/app", "Tell me after"), ("The Pond project", "Just do it")])
+        self.assertEqual(rules[-1]["label"], "Add a rule")
+        self.assertEqual(rules[0]["choice"]["fields"], {"scope": "github:onterris/*", "kind": "merge"})
+
+
+class Projects(unittest.TestCase):
+    """projects(): the cards a project rule reads, from the command, and None when they can't be read."""
+
+    def run_with(self, cmd):
+        with mock.patch.dict(os.environ, {"APPROVALS_PROJECTS": cmd}):
+            return ap.projects()
+
+    def test_reads_cards_and_normalizes_bare_repos(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        f = Path(td.name) / "cards.json"
+        f.write_text(json.dumps([{"slug": "pond", "name": "Pond", "links": {"repos": ["Acme/Pond", "forgejo:codeberg.org/a/b"]}}]))
+        self.assertEqual(self.run_with(f"cat {f}"), [{"slug": "pond", "name": "Pond", "repos": ["github:acme/pond", "forgejo:codeberg.org/a/b"]}])
+
+    def test_none_when_it_fails_or_isnt_a_list(self):
+        self.assertIsNone(self.run_with("false"))
+        self.assertIsNone(self.run_with("echo nope"))
+        self.assertIsNone(self.run_with("echo {}"))
+        self.assertIsNone(self.run_with("/no/such/command"))
+
+
 if __name__ == "__main__":
     unittest.main()

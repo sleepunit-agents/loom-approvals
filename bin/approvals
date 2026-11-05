@@ -7,6 +7,15 @@
                                 spend an allowed approval: once, for exactly that kind and target
     approvals list              the recent ones (the owner's view, on loom's machine)
 
+Standing rules (loom docs/specs/changes.md): the owner's lasting answer for merging, per repo pattern or project.
+    approvals rule merge TARGET do | tell | ask, and for ask the newest merge approval's state for TARGET
+                                (TARGET is <forge>:<locator>#<n>@<head>, e.g. github:acme/app#12@<40 hex>)
+    approvals tell --kind merge --target TARGET --what "…"
+                                after merging under a do or tell rule: an FYI on loom's Inbox
+    approvals grant --kind merge --target TARGET --for AGENT --by MEMBER [--deny]
+                                loom's machine only (the Changes piece's Yes and Not yet): the owner's answer
+                                before, or instead of, the agent's request
+
 loom's approvals piece (loom-approvals): bodies create and check requests and spend
 an allowed one; they never approve. Only the owner does, with Allow or Deny on loom's
 Home (a card under "Your call"). An approval is a single-use receipt for one action:
@@ -26,6 +35,10 @@ Settings (environment; a managed piece gets them from loom):
   APPROVALS_LOCAL_AGENT  the agent a request made on loom's machine itself is from
                          (default: agent)
   APPROVALS_KINDS        extra words for kinds, as JSON: {"github-write": "A GitHub write"}
+  APPROVALS_SEED_RULES   the standing rules to start with, as JSON (written once, when there are none yet):
+                         [{"kind": "merge", "scope": "github:acme/*", "tier": "do"}]
+  APPROVALS_PROJECTS     the command that lists project cards, for project:<slug> rules
+                         (default: loom project list --json)
 """
 import argparse
 import fcntl
@@ -33,6 +46,8 @@ import json
 import os
 import re
 import secrets
+import shlex
+import subprocess
 import sys
 import unicodedata
 import urllib.error
@@ -85,6 +100,22 @@ ID = re.compile(r"^a-[0-9a-f]{8}$")
 TARGET_MAX, WORDS_MAX = 200, 300
 DEFAULT_MIN, MAX_MIN = 60, 8 * 60
 KEEP = 300
+GRANT_MIN = 24 * 60          # an owner's grant (approvals grant) lasts a day: it's bound to one head anyway
+NOTICES_KEEP = 50
+# A merge approval's target: one change at one head (loom docs/specs/changes.md, "Ids").
+FORGE = r"[a-z][a-z0-9-]{0,23}"
+# A merge target is literal: a body chooses it, and Always turns its repo into a rule, so nothing in it may read as a
+# pattern. Segments are [A-Za-z0-9._-]; two to four of them (github owner/repo, forgejo host/owner/repo, azure
+# org/project/repo), 120 characters at most.
+SEGMENT = r"[A-Za-z0-9._-]+"
+LITERAL_LOCATOR = rf"{SEGMENT}(?:/{SEGMENT}){{1,3}}"
+MERGE_TARGET = re.compile(rf"({FORGE}):({LITERAL_LOCATOR})#([1-9][0-9]{{0,9}})@([0-9a-f]{{40}})")
+LOCATOR_MAX = 120
+LOCATOR = r"[\x21-\x22\x24-\x3f\x41-\x7e]{1,120}"     # a rule's pattern (the owner's): printable ASCII but space, # and @
+PATTERN_CHARS = set("*?[]{}!\\")
+TIERS = ("do", "tell", "ask")
+RULE_KINDS = ("merge",)
+RULES_MAX = 100
 
 
 def now():
@@ -132,15 +163,49 @@ class Store:
             self.d = json.loads(self.path.read_text())
         except (OSError, ValueError):
             self.d = {"v": 1, "approvals": {}}
+        self._rules = None
         return self
 
     def save(self):
         rows = sorted(self.d["approvals"].values(), key=lambda a: a["at"], reverse=True)
         self.d["approvals"] = {a["id"]: a for a in rows[:KEEP]}
-        tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
+        self.write_json(self.path, self.d)
+
+    def rules(self):
+        """The standing rules (rules.json beside the store), under the same lock. Seeded once from
+        APPROVALS_SEED_RULES when the file doesn't exist yet; never again, so a rule the owner removed stays removed.
+        A file that can't be read, or whose rules aren't rules, answers no rules (so everything asks) and is marked
+        broken, so no edit overwrites it with that emptiness."""
+        if self._rules is not None:
+            return self._rules
+        path = STATE / "rules.json"
+        self.rules_broken = False
+        try:
+            rows = json.loads(path.read_text())["rules"]
+            if not isinstance(rows, list):
+                raise TypeError("rules isn't a list")
+            self._rules = [r for r in rows if well_formed(r)]
+            if len(self._rules) != len(rows):
+                self.rules_broken = True
+        except FileNotFoundError:
+            self._rules = seed_rules()
+            self.write_json(path, {"v": 1, "rules": self._rules})
+        except (OSError, ValueError, KeyError, TypeError):
+            self._rules, self.rules_broken = [], True
+        return self._rules
+
+    def replace_rules(self, rules):
+        if self.rules_broken:
+            raise ValueError("rules.json can't be read as it is; fix or remove it on loom's machine before changing a rule")
+        self._rules = rules
+        self.write_json(STATE / "rules.json", {"v": 1, "rules": rules})
+
+    @staticmethod
+    def write_json(path, obj):
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         with os.fdopen(os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
-            f.write(json.dumps(self.d, indent=1) + "\n")
-        tmp.replace(self.path)
+            f.write(json.dumps(obj, indent=1) + "\n")
+        tmp.replace(path)
 
     def log(self, event, a, **extra):
         with os.fdopen(os.open(self.audit, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600), "a") as f:
@@ -149,6 +214,25 @@ class Store:
 
     def __exit__(self, *exc):
         self.lock.close()
+
+
+def newest_decision(rows, kind, target, agent):
+    """The owner's newest answer for this kind, target and agent: the approval decided last, or None."""
+    done = [a for a in rows if a["kind"] == kind and a["target"] == target and a["who"].get("agent") == agent and a.get("decided")]
+    return max(done, key=lambda a: a["decided"], default=None)
+
+
+def deny_siblings(s, kind, target, agent, keep, by=None):
+    """A deny stops every earlier yes: each unspent pending or allowed approval for the same kind, target and agent
+    is denied too, and logged."""
+    for a in s.d["approvals"].values():
+        if a["id"] != keep and a["kind"] == kind and a["target"] == target and a["who"].get("agent") == agent \
+                and state_of(a) in ("pending", "allowed"):
+            a["state"], a["decided"], a["superseded_by"] = "denied", iso(now()), keep
+            a.pop("expires", None)
+            if by:
+                a["by"] = by
+            s.log("deny-superseded", a, by_deny=keep)
 
 
 def state_of(a, t=None):
@@ -187,6 +271,8 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False):
     if kind in PIECE_KINDS and not acting_for:
         raise PermissionError(f"a {kind} approval is filed by the piece on loom's machine for its body (--as), not by a body")
     target = exact_target(target)
+    if kind == "merge" and not repo_of(target):
+        raise ValueError("a merge target is literal: <forge>:<owner>/<repo>#<n>@<40-hex head>, letters, digits, . _ - only")
     # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
     # are refused, never cut, so nothing can hide past the part the owner reads.
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
@@ -198,9 +284,19 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False):
     mins = DEFAULT_MIN if not minutes else max(1, min(int(minutes), MAX_MIN))
     with Store() as s:
         # Asking again for the same thing is the same card.
+        last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
             if a["kind"] == kind and a["target"] == target and a["who"] == who and state_of(a) in ("pending", "allowed"):
+                # An allowed one counts only if the owner hasn't said no to this exact thing since.
+                if state_of(a) == "allowed" and last and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
+                    continue
                 return a
+        # The owner answered this exact target already (approvals grant): that's the answer, newest first.
+        granted = sorted((a for a in s.d["approvals"].values() if a.get("granted") and a["kind"] == kind
+                          and a["target"] == target and a["who"].get("agent") == who["agent"]
+                          and state_of(a) in ("allowed", "denied")), key=lambda a: a["at"], reverse=True)
+        if granted:
+            return {**granted[0], "state": state_of(granted[0])}
         a = {"id": "a-" + secrets.token_hex(4), "kind": kind, "target": target, "what": what, "why": why,
              "who": who, "minutes": mins, "at": iso(now()), "state": "pending"}
         s.d["approvals"][a["id"]] = a
@@ -231,10 +327,16 @@ def use(caller, aid, kind, target):
         if a["kind"] != kind or a["target"] != target:
             s.log("refused-use", a, kind_used=kind, target_used=target)
             raise PermissionError(f"{aid} allows {a['kind']} for {a['target']}, not {kind} for {target}")
+        last = newest_decision(s.d["approvals"].values(), kind, target, a["who"].get("agent"))
+        if last and last["id"] != aid and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
+            s.log("refused-use", a, denied_by=last["id"])
+            raise PermissionError(f"{aid} was overruled: the owner said no to {target} after ({last['id']})")
         # The agent that asked spends it, from any of its houses: the house that asked is
         # usually gone by the time the owner answers, hours later, and the agent's next house
         # is the one that carries on. The action itself is pinned by kind and target.
-        if spender(a["who"]) != spender(who):
+        # An owner's grant (approvals grant) was asked from no place, so only the agent is matched.
+        mine = a["who"].get("agent") == who.get("agent") if a.get("granted") else spender(a["who"]) == spender(who)
+        if not mine:
             s.log("refused-use", a, who_used=who)
             raise PermissionError(f"{aid} was asked by {a['who']['agent']} in {a['who']['where']}, not by {who['agent']} in {who['where']}")
         a["state"], a["used"] = "used", iso(now())
@@ -243,7 +345,7 @@ def use(caller, aid, kind, target):
         return a
 
 
-def answer(aid, action, by=None):
+def answer(aid, action, by=None, minutes=None):
     """by: the household member who answered (loom's caller, loom docs/specs/owners.md), when loom says."""
     with Store() as s:
         a = s.d["approvals"].get(aid)
@@ -257,7 +359,9 @@ def answer(aid, action, by=None):
         if by:
             a["by"] = by
         if action == "allow":
-            a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + a["minutes"] * 60, timezone.utc))
+            a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + (minutes or a["minutes"]) * 60, timezone.utc))
+        else:
+            deny_siblings(s, a["kind"], a["target"], a["who"].get("agent"), a["id"], by)
         s.save()
         s.log(action, a)
         return a
@@ -268,6 +372,257 @@ def recent():
         return sorted(({**a, "state": state_of(a)} for a in s.d["approvals"].values()), key=lambda a: a["at"], reverse=True)
 
 
+# ---------------------------------------------------------------- standing rules
+
+def seed_rules():
+    try:
+        rows = json.loads(setting("APPROVALS_SEED_RULES", "[]"))
+    except ValueError:
+        return []
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        try:
+            rule = make_rule(r.get("kind", "merge"), r.get("scope"), r.get("tier"), "seed")
+        except ValueError:
+            continue
+        out = [x for x in out if not (x["kind"] == rule["kind"] and x["scope"] == rule["scope"])] + [rule]
+    return out[:RULES_MAX]
+
+
+PROJECT_SCOPE = re.compile(r"project:[a-z0-9]+(?:-[a-z0-9]+)*")
+STRICT = {"ask": 0, "tell": 1, "do": 2}      # strictest first
+
+
+def well_formed(r):
+    return isinstance(r, dict) and r.get("kind") in RULE_KINDS and r.get("tier") in TIERS \
+        and isinstance(r.get("scope"), str) and valid_scope(r["scope"])
+
+
+def valid_scope(scope):
+    """project:<slug>, exactly; or <forge>:<pattern>, where forge is never "project" (that's a project's)."""
+    if scope.startswith("project:"):
+        return PROJECT_SCOPE.fullmatch(scope) is not None
+    return re.fullmatch(rf"{FORGE}:{LOCATOR}", scope) is not None
+
+
+def make_rule(kind, scope, tier, by):
+    if kind not in RULE_KINDS:
+        raise ValueError(f"only {', '.join(RULE_KINDS)} has standing rules")
+    scope = str(scope or "").strip()
+    if ":" in scope and not scope.startswith("project:"):
+        forge, _, loc = scope.partition(":")
+        scope = f"{forge}:{loc.lower()}"
+    if not valid_scope(scope):
+        raise ValueError("a scope is a repo pattern like github:acme/* or github:acme/app, or a project like project:pond")
+    if tier not in TIERS:
+        raise ValueError("a tier is do (just do it), tell (tell me after) or ask (ask me)")
+    return {"kind": kind, "scope": scope, "tier": tier, "by": by or "owner", "at": iso(now())}
+
+
+def repo_of(target):
+    """A merge target's repo id (github:acme/app), its change number and head, or None."""
+    m = MERGE_TARGET.fullmatch(str(target or ""))
+    if not m or len(m.group(2)) > LOCATOR_MAX:
+        return None
+    return {"repo": f"{m.group(1)}:{m.group(2).lower()}", "forge": m.group(1), "locator": m.group(2).lower(),
+            "number": int(m.group(3)), "head": m.group(4)}
+
+
+def norm_repo(sel):
+    """A project card's repo selector as a repo id: a bare owner/repo is github's (loom docs/specs/projects.md)."""
+    sel = str(sel or "").strip()
+    if not re.match(rf"^{FORGE}:", sel):
+        sel = "github:" + sel
+    forge, _, loc = sel.partition(":")
+    return f"{forge}:{loc.lower()}"
+
+
+def projects():
+    """The live project cards as [{slug, name, repos}], in loom's order; None when they can't be read."""
+    cmd = setting("APPROVALS_PROJECTS", "loom project list --json")
+    try:
+        out = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=2, stdin=subprocess.DEVNULL)
+        rows = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    return [{"slug": r.get("slug"), "name": r.get("name") or r.get("slug"),
+             "repos": [norm_repo(x) for x in ((r.get("links") or {}).get("repos") or []) if isinstance(x, str)]}
+            for r in rows if isinstance(r, dict) and isinstance(r.get("slug"), str)]
+
+
+def glob_match(pattern, text):
+    """* is any characters but / within one segment; everything else is itself."""
+    rx = "".join("[^/]*" if c == "*" else re.escape(c) for c in pattern)
+    return re.fullmatch(rx, text) is not None
+
+
+def resolve(rules, kind, target, cards=None):
+    """Which rule applies to TARGET, and its tier: (tier, rule or None, note). Most specific wins: an exact repo,
+    then a project, then a pattern with fewer *; at a tie the stricter tier. No rule: ask."""
+    r = repo_of(target)
+    if not r:
+        raise ValueError("a merge target is <forge>:<locator>#<n>@<40-hex head>, like github:acme/app#12@…")
+    hits, note = [], None
+    for rule in rules:
+        if rule.get("kind") != kind:
+            continue
+        scope = rule.get("scope", "")
+        if scope.startswith("project:"):
+            if cards is None:
+                note = "the project list couldn't be read, so no project rule applied"
+                continue
+            slug = scope[len("project:"):]
+            if any(c["slug"] == slug and r["repo"] in c["repos"] for c in cards):
+                hits.append(((1, 0), rule))
+        else:
+            forge, _, pat = scope.partition(":")
+            if forge == r["forge"] and glob_match(pat.lower(), r["locator"]):
+                stars = pat.count("*")
+                hits.append(((0, 0) if stars == 0 else (2, stars), rule))
+    if not hits:
+        return "ask", None, note
+    hits.sort(key=lambda h: (h[0], STRICT[h[1]["tier"]]))
+    return hits[0][1]["tier"], hits[0][1], note
+
+
+def needs_cards(rules):
+    return any(r.get("scope", "").startswith("project:") for r in rules)
+
+
+def rules_for(agent, kind, targets):
+    """Each target's tier and, for ask, the newest merge approval for it and this agent: {target: {tier, approval?}}."""
+    if kind not in RULE_KINDS:
+        raise ValueError(f"only {', '.join(RULE_KINDS)} has standing rules")
+    with Store() as s:
+        rules = list(s.rules())
+        rows = [a for a in s.d["approvals"].values() if a["kind"] == kind and a["who"].get("agent") == agent]
+    cards = projects() if needs_cards(rules) else []
+    out = {}
+    for t in targets:
+        tier, rule, note = resolve(rules, kind, t, cards)
+        mine = sorted((a for a in rows if a["target"] == t), key=lambda a: a["at"], reverse=True)
+        out[t] = {"tier": tier, **({"scope": rule["scope"]} if rule else {}), **({"note": note} if note else {}),
+                  **({"approval": {"id": mine[0]["id"], "state": state_of(mine[0])}} if mine else {})}
+    return out
+
+
+def rule_answer(caller, kind, targets, agent=None, as_json=False):
+    """`rule merge TARGET…`: for the asking agent, or (loom's machine only) --for another agent."""
+    if agent and caller:
+        raise PermissionError("--for is for loom's machine (the Changes piece), not over the API")
+    if not 1 <= len(targets) <= 200:
+        raise ValueError("rule merge TARGET [TARGET…], 200 at most")
+    who = {"agent": agent} if agent else who_of(caller)
+    res = rules_for(who["agent"], kind, targets)
+    if as_json:
+        return json.dumps(res) + "\n", ""
+    out = []
+    for t in targets:
+        r = res[t]
+        line = r["tier"] + (f" {r['approval']['state']} {r['approval']['id']}" if r["tier"] == "ask" and "approval" in r else "")
+        out.append(line + ("" if len(targets) == 1 else f"  {t}"))
+    notes = {r["note"] for r in res.values() if "note" in r}
+    return "\n".join(out) + "\n", "".join(f"approvals: {n}\n" for n in notes)
+
+
+def with_rule(rules, kind, scope, tier, by):
+    """The rules with the (kind, scope) rule set to tier, or removed for tier none. Validates the scope."""
+    rule = make_rule(kind, scope, "ask" if tier == "none" else tier, by)
+    rest = [r for r in rules if not (r["kind"] == kind and r["scope"] == rule["scope"])]
+    if tier == "none":
+        return rest, rule
+    if len(rest) >= RULES_MAX:
+        raise ValueError(f"{RULES_MAX} rules at most")
+    return rest + [rule], rule
+
+
+def set_rule(kind, scope, tier, by):
+    """The owner's edit: tier none removes the scope's rule."""
+    with Store() as s:
+        rules, rule = with_rule(s.rules(), kind, scope, tier, by)
+        s.replace_rules(rules)
+        return rule
+
+
+def always(aid, by, cards):
+    """Always for <project or repo> on a pending merge approval: the rule set to do and the approval allowed, under
+    one lock, so neither happens without the other."""
+    with Store() as s:
+        a = s.d["approvals"].get(aid)
+        if not a:
+            raise LookupError("no such approval")
+        if state_of(a) != "pending":
+            raise PermissionError(f"it's already {state_of(a)}")
+        al = always_scope(a, cards)
+        if not al:
+            raise ValueError("Always is for a merge of one repo")
+        rules, _ = with_rule(s.rules(), "merge", al[0], "do", by)
+        t = now()
+        a["state"], a["decided"] = "allowed", iso(t)
+        if by:
+            a["by"] = by
+        a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + a["minutes"] * 60, timezone.utc))
+        s.replace_rules(rules)
+        s.save()
+        s.log("allow", a, always=al[0])
+        return a, al
+
+
+def grant(kind, target, agent, by, deny=False):
+    """The owner's answer from loom's machine (the Changes piece's Yes and Not yet): answers the agent's pending
+    request for TARGET, or makes the answer for one it hasn't made yet."""
+    if kind != "merge" or not repo_of(target):
+        raise ValueError("grant is for a merge approval: --kind merge --target <forge>:<locator>#<n>@<head>")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", agent or ""):
+        raise ValueError("--for is the agent whose change it is")
+    with Store() as s:
+        pending = sorted((a for a in s.d["approvals"].values() if a["kind"] == kind and a["target"] == target
+                          and a["who"].get("agent") == agent and state_of(a) == "pending"), key=lambda a: a["at"])
+    if pending:
+        return answer(pending[-1]["id"], "deny" if deny else "allow", by, minutes=GRANT_MIN)
+    with Store() as s:
+        t = now()
+        a = {"id": "a-" + secrets.token_hex(4), "kind": kind, "target": target,
+             "what": f"merge {target.split('@')[0]}", "why": "the owner said " + ("not yet" if deny else "yes, merge it"),
+             "who": {"agent": agent, "where": "any"}, "granted": True, "minutes": GRANT_MIN, "at": iso(t),
+             "state": "denied" if deny else "allowed", "decided": iso(t)}
+        if by:
+            a["by"] = by
+        if not deny:
+            a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + GRANT_MIN * 60, timezone.utc))
+        else:
+            deny_siblings(s, kind, target, agent, a["id"], by)
+        s.d["approvals"][a["id"]] = a
+        s.save()
+        s.log("grant" if not deny else "grant-deny", a)
+        return a
+
+
+def tell(caller, kind, target, what):
+    """After merging under a do or tell rule: an FYI for the owner (the manifest's notices)."""
+    who = who_of(caller)
+    if len(plain(what, 10**6)) > WORDS_MAX:
+        raise ValueError(f"--what is {WORDS_MAX} characters at most as shown; say it shorter")
+    what = plain(what, WORDS_MAX)
+    if not what:
+        raise ValueError("--what says what was merged, for the owner")
+    with Store() as s:
+        rules = list(s.rules())
+    tier, _, _ = resolve(rules, kind, target, projects() if needs_cards(rules) else [])
+    if tier == "ask":
+        raise PermissionError(f"the rule for {target.split('@')[0]} is ask me: request a merge approval instead")
+    with Store() as s:
+        n = {"at": iso(now()), "agent": who["agent"], "kind": kind, "target": target, "what": what}
+        s.d.setdefault("notices", []).insert(0, n)
+        s.d["notices"] = s.d["notices"][:NOTICES_KEEP]
+        s.save()
+        return n
+
+
 # ---------------------------------------------------------------- loom's page
 
 OUTCOME = {"allowed": "Allowed, not used yet.", "used": "Allowed, and used.", "denied": "Denied.", "expired": "Allowed, but it expired unused."}
@@ -275,7 +630,7 @@ OUTCOME = {"allowed": "Allowed, not used yet.", "used": "Allowed, and used.", "d
 # The page says what an approval is for in plain words, not ids.
 STATE_WORDS = {"pending": "Waiting on you", "allowed": "Allowed", "used": "Used", "denied": "Denied", "expired": "Expired"}
 # The kinds the clock piece files, plus any the instance names (APPROVALS_KINDS).
-KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent"}
+KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent", "merge": "A merge"}
 try:
     _extra = json.loads(setting("APPROVALS_KINDS", "{}"))
     KIND_WORDS.update({k: v for k, v in _extra.items() if KIND.match(str(k)) and isinstance(v, str)} if isinstance(_extra, dict) else {})
@@ -319,6 +674,19 @@ def meta_of(a):
     return " · ".join(x for x in (kind + (f": {target}" if target else ""), f"from {place_of(a['who'])}{later}", f"“{a['why']}”") if x)
 
 
+def notices():
+    with Store() as s:
+        return list(s.d.get("notices") or [])
+
+
+def notice_of(n):
+    tgt = n.get("target", "")
+    r = repo_of(tgt)
+    change = f"{r['locator']}#{r['number']}" if r else tgt.split("@")[0]
+    return {"text": f"{name_of(n.get('agent'))} merged {change}", "meta": n.get("what") or "under a tell me after rule",
+            "at": n["at"], "agent": n.get("agent"), "page": ""}
+
+
 def ui_manifest():
     rows = recent()
     pending = [a for a in rows if a["state"] == "pending"][:10]
@@ -336,7 +704,7 @@ def ui_manifest():
         "text": f"{name_of(a['who']['agent'])} asked: {what_of(a)}"[:300],
         "outcome": OUTCOME[a["state"]] + (f" ({'Allowed' if a['state'] != 'denied' else 'Denied'} by {a['by']}.)" if a.get("by") else ""),
         "at": a.get("used") or a.get("decided") or a["at"], "kind": "permission", "agent": a["who"]["agent"], "page": "",
-    } for a in done]}
+    } for a in done], "notices": [notice_of(n) for n in notices()[:20]]}
 
 
 def ago(stamp, t=None):
@@ -383,9 +751,24 @@ def from_of(a):
     return f"from {place_of(a['who'])}{later}"
 
 
-def answers_of(a):
-    return [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}},
-            {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}]
+def always_scope(a, cards):
+    """For a pending merge approval: the scope Always would set, and its words. The project that names the repo
+    (the first, in loom's order), else the exact repo."""
+    r = repo_of(a.get("target"))
+    if a.get("kind") != "merge" or not r or PATTERN_CHARS & set(r["repo"]):
+        return None        # never a pattern from a body's target: refused, not escaped
+    for c in cards or []:
+        if r["repo"] in c["repos"]:
+            return f"project:{c['slug']}", f"Always for {c['name']}"
+    return r["repo"], f"Always for {r['locator']}"
+
+
+def answers_of(a, cards=None):
+    items = [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}}]
+    al = always_scope(a, cards) if cards is not None else None
+    if al:
+        items.append({"action": "always", "label": al[1], "fields": {"id": a["id"]}})
+    return items + [{"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}]
 
 
 def outcome_of(a):
@@ -423,6 +806,11 @@ def ui_page(req):
     rows = recent()
     pending = [a for a in rows if a["state"] == "pending"]
     past = [a for a in rows if a["state"] != "pending"][:60]
+    owner = is_owner(req)
+    if owner:
+        with Store() as s:
+            proj_rules = any(r["scope"].startswith("project:") for r in s.rules())
+    cards = projects() if owner and (proj_rules or any(a["kind"] == "merge" for a in pending)) else None
     sections = []
     if pending:
         # Each waiting approval: what it would do, and why, in words; Allow once and Deny in its sheet.
@@ -433,12 +821,14 @@ def ui_page(req):
                 {"type": "text", "text": cap(what_of(a))},
                 {"type": "text", "tone": "muted", "text": f"{kind_of(a)}, {from_of(a)}, {ago(a['at'])}. “{a['why']}”"},
                 {"type": "text", "tone": "muted", "text": f"Allowing it lets that one action through once, within {a['minutes']} min."},
-                {"type": "buttons", "items": answers_of(a)},
+                {"type": "buttons", "items": answers_of(a, cards if owner else None)},
             ]},
         } for a in pending[:20]]}]})
     else:
         sections.append({"id": "waiting", "blocks": [{"type": "health", "tone": "ok", "text": "Nothing waiting on you",
                                                       "detail": "When a body asks for an approval, it shows here and on Home."}]})
+    if owner:
+        sections.append(rules_section(cards))
     if past:
         sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
             "text": f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
@@ -455,6 +845,55 @@ def ui_page(req):
             "sections": sections}
 
 
+TIER_WORDS = {"do": "Just do it", "tell": "Tell me after", "ask": "Ask me"}
+TIER_DETAIL = {"do": "Merges once CI is green and review is clean, without asking",
+               "tell": "Merges once it's green, then tells you", "ask": "Asks you for each merge, one commit at a time"}
+
+
+def scope_words(scope, cards):
+    """A rule's scope as people say it: "The pond project", "Everything in onterris", "acme/app", "acme/app-*"."""
+    if scope.startswith("project:"):
+        slug = scope[len("project:"):]
+        name = next((c["name"] for c in cards or [] if c["slug"] == slug), slug)
+        return f"The {name} project"
+    forge, _, pat = scope.partition(":")
+    where = "" if forge == "github" else f" on {forge.capitalize()}"
+    m = re.fullmatch(r"([^/*]+)/\*", pat)
+    return (f"Everything in {m.group(1)}" if m else pat) + where
+
+
+def rules_section(cards):
+    with Store() as s:
+        rules = list(s.rules())
+    rows = [{
+        "label": scope_words(r["scope"], cards), "value": TIER_WORDS[r["tier"]], "detail": TIER_DETAIL[r["tier"]],
+        "tone": "warn" if r["tier"] == "ask" else None,
+        "choice": {"action": "rule", "name": "tier", "value": r["tier"], "fields": {"scope": r["scope"], "kind": r["kind"]},
+                   "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS] + [{"value": "none", "label": "No rule"}]},
+    } for r in sorted(rules, key=lambda r: (STRICT[r["tier"]], r["scope"]))]
+    for row in rows:
+        if row["tone"] is None:
+            del row["tone"]
+    rows.append({"label": "Add a rule", "value": "For a repo, a pattern of repos, or a project",
+                 "edit": {"action": "rule-add", "title": "Add a rule", "submit": "Add the rule",
+                          "note": "A repo (github:acme/app), a pattern (github:acme/*) or a project (project:pond). "
+                                  "The most specific rule wins; with none, a merge asks you.",
+                          "fields": [{"name": "scope", "label": "For", "kind": "text", "required": True,
+                                      "hint": "github:acme/* or project:pond"},
+                                     {"name": "tier", "label": "Then", "kind": "segmented", "value": "ask",
+                                      "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS]}]}})
+    blocks = [{"type": "panel", "title": "Merging", "rows": rows}]
+    return {"id": "rules", "title": "Standing rules", "fold": "open", "blocks": blocks}
+
+
+def is_owner(req):
+    """The household's owner (every agent's), or loom outside a household (no caller): rules are theirs alone."""
+    c = (req or {}).get("caller")
+    if c is None:
+        return True
+    return isinstance(c, dict) and c.get("kind") == "owner" and c.get("agents") == "*"
+
+
 def caller_who(req):
     """The member acting on loom's page (its caller, in a household), if it names one cleanly."""
     c = (req or {}).get("caller") or {}
@@ -464,7 +903,28 @@ def caller_who(req):
 
 def ui_act(req):
     action = (req or {}).get("action")
-    aid = ((req or {}).get("fields") or {}).get("id", "")
+    f = (req or {}).get("fields") or {}
+    if action in ("rule", "rule-add"):
+        if not is_owner(req):
+            return {"ok": False, "message": "Standing rules are the household owner's.", "page": ""}
+        try:
+            r = set_rule(f.get("kind") or "merge", f.get("scope"), f.get("tier"), caller_who(req))
+        except ValueError as e:
+            return {"ok": False, "message": str(e), "page": ""}
+        words = scope_words(r["scope"], projects() if r["scope"].startswith("project:") else [])
+        return {"ok": True, "message": f"{words}: " + ("no rule now, so it asks" if f.get("tier") == "none" else TIER_WORDS[r["tier"]].lower()), "page": ""}
+    aid = f.get("id", "")
+    if action == "always":
+        if not is_owner(req):
+            return {"ok": False, "message": "Standing rules are the household owner's.", "page": ""}
+        if not ID.match(str(aid)):
+            return {"ok": False, "message": "That isn't an approval.", "page": ""}
+        cards = projects()
+        try:
+            _, al = always(aid, caller_who(req), cards)
+        except (LookupError, PermissionError, ValueError) as e:
+            return {"ok": False, "message": str(e), "page": ""}
+        return {"ok": True, "message": f"Allowed, and from now on: {scope_words(al[0], cards)}, just do it.", "page": ""}
     if action not in ("allow", "deny") or not ID.match(str(aid)):
         return {"ok": False, "message": "That isn't an approval.", "page": ""}
     try:
@@ -508,9 +968,12 @@ def api_answer(req):
         return refuse(403, "only an agent's bodies ask here; the owner answers on the page")
     argv = (req.get("body") or {}).get("argv")
     if not isinstance(argv, list) or not 1 <= len(argv) <= 14 or not all(isinstance(a, str) and len(a) <= 600 for a in argv):
-        return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID | use ID --kind K --target T")
+        return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID | use ID --kind K --target T"
+                           " | rule merge TARGET | tell --kind merge --target TARGET --what W")
     try:
-        return {"status": 200, "body": {"exit": 0, "stdout": run(argv, caller), "stderr": ""}}
+        out = run(argv, caller)
+        out, err = out if isinstance(out, tuple) else (out, "")
+        return {"status": 200, "body": {"exit": 0, "stdout": out, "stderr": err}}
     except (ValueError, LookupError, PermissionError) as e:
         return {"status": 200, "body": {"exit": 1, "stdout": "", "stderr": f"approvals: {e}\n"}}
 
@@ -529,6 +992,19 @@ def run(argv, caller=None):
     u.add_argument("--target", default="")
     u.add_argument("--as", dest="as_", default="")
     sub.add_parser("list", add_help=False, exit_on_error=False)
+    ru = sub.add_parser("rule", add_help=False, exit_on_error=False)
+    ru.add_argument("kind")
+    ru.add_argument("targets", nargs="+")
+    ru.add_argument("--for", dest="for_", default="")
+    ru.add_argument("--json", action="store_true")
+    t = sub.add_parser("tell", add_help=False, exit_on_error=False)
+    for fl in ("--kind", "--target", "--what"):
+        t.add_argument(fl, default="")
+    g = sub.add_parser("grant", add_help=False, exit_on_error=False)
+    for fl in ("--kind", "--target", "--by"):
+        g.add_argument(fl, default="")
+    g.add_argument("--for", dest="for_", default="")
+    g.add_argument("--deny", action="store_true")
     try:
         a = ap.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
@@ -545,6 +1021,8 @@ def run(argv, caller=None):
     if a.cmd == "request":
         x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None,
                     acting_for=bool(a.as_))
+        if x["state"] == "denied":
+            return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
         if x["state"] == "allowed":
             return f"{x['id']}: already allowed (until {x['expires']}); use it: approvals use {x['id']} --kind {x['kind']} --target '{x['target']}'\n"
         return f"{x['id']}: asked the owner (a card on loom's Home); check it: approvals check {x['id']}\n"
@@ -553,11 +1031,26 @@ def run(argv, caller=None):
     if a.cmd == "use":
         use(caller, a.id, a.kind, a.target)
         return f"{a.id}: used\n"
+    if a.cmd == "rule":
+        return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json)
+    if a.cmd == "tell":
+        if a.kind not in RULE_KINDS or not repo_of(a.target):
+            raise ValueError("tell --kind merge --target <forge>:<locator>#<n>@<head> --what \"…\"")
+        n = tell(caller, a.kind, a.target, a.what)
+        return f"told the owner: {notice_of(n)['text']}\n"
+    if a.cmd == "grant":
+        # The owner's answer, from loom's machine only (the Changes piece's Yes and Not yet): never a body's.
+        if caller:
+            raise PermissionError("grant is the owner's, on loom's machine; a body asks with request")
+        if a.by and not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", a.by):
+            raise ValueError("--by is a household member's slug")
+        x = grant(a.kind, a.target, a.for_, a.by or None, a.deny)
+        return f"{x['id']}: {x['state']}\n"
     if a.cmd == "list":
         if caller:
             raise PermissionError("the list is the owner's, on loom's machine")
         return "".join(f"{x['id']} {x['state']:<8} {x['kind']} {x['target']} — {x['who']['agent']}: {x['what']}\n" for x in recent()[:30])
-    raise ValueError("request | check | use | list")
+    raise ValueError("request | check | use | list | rule | tell | grant")
 
 
 # ---------------------------------------------------------------- in a house
@@ -630,7 +1123,10 @@ def main():
         print(__doc__.strip())
         return
     try:
-        sys.stdout.write(run(args))
+        out = run(args)
+        out, err = out if isinstance(out, tuple) else (out, "")
+        sys.stdout.write(out)
+        sys.stderr.write(err)
     except (ValueError, LookupError, PermissionError) as e:
         sys.exit(f"approvals: {e}")
 
