@@ -56,7 +56,8 @@ approvals grant --kind merge --target <same> --for AGENT --by MEMBER [--deny]   
   stays inside one path segment) or a project (`project:pond`: every repo
   that project's card lists, read with `loom project list --json`). The most
   specific rule wins (an exact repo, then a project, then fewer `*`), the
-  stricter one at a tie, and with no rule a merge asks.
+  stricter one at a tie, and with no rule a merge asks. With a project rule in play
+  and the project list unreadable, it asks (it fails closed).
 - **A merge approval** is for one change at one head:
   `<forge>:<locator>#<n>@<head>`. A push changes the head, so an old Yes no
   longer matches and `use` refuses it.

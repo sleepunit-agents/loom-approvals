@@ -467,6 +467,10 @@ def resolve(rules, kind, target, cards=None):
     if not r:
         raise ValueError("a merge target is <forge>:<locator>#<n>@<40-hex head>, like github:acme/app#12@…")
     hits, note = [], None
+    # Failing closed: with a project rule in play and no project list to read, nothing can say this repo isn't in
+    # that project, so a pattern mustn't loosen it. Ask.
+    if cards is None and any(x.get("kind") == kind and x.get("scope", "").startswith("project:") for x in rules):
+        return "ask", None, "the project list couldn't be read, so this asks (a project rule might apply)"
     for rule in rules:
         if rule.get("kind") != kind:
             continue

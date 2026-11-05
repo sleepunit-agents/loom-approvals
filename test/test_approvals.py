@@ -356,8 +356,8 @@ class Rules(unittest.TestCase):
         tie = [ap.make_rule("merge", "github:acme/*", "do", "x"), ap.make_rule("merge", "github:*/app", "tell", "x")]
         self.assertEqual(ap.resolve(tie, "merge", T)[0], "tell", "a tie goes to the stricter")
         # The project list unreadable: no project rule applies, and the answer says so.
-        t, _, note = ap.resolve(rules, "merge", f"github:acme/pond-ui#1@{SHA}", None)
-        self.assertEqual(t, "tell")
+        t, _, note = ap.resolve(rules, "merge", f"github:acme/other#1@{SHA}", None)
+        self.assertEqual(t, "ask", "fail closed: a do pattern doesn't win while a project rule can't be checked")
         self.assertIn("project list", note)
         with self.assertRaises(ValueError):
             ap.resolve(rules, "merge", "github:acme/app#12")       # no head
@@ -555,8 +555,12 @@ class Rules(unittest.TestCase):
         self.rules(("project:pond", "ask"), ("github:acme/*", "do"))
         with mock.patch.object(ap, "projects", lambda: None):
             r = self.api(["rule", "merge", f"github:acme/pond#1@{SHA}"])
-        self.assertEqual(r["stdout"], "do\n")
+        self.assertEqual(r["stdout"], "ask\n")
         self.assertIn("project list", r["stderr"])
+        # Without a project rule, the list isn't needed and the pattern stands.
+        self.rules(("github:acme/*", "do"))
+        with mock.patch.object(ap, "projects", lambda: None):
+            self.assertEqual(self.api(["rule", "merge", f"github:acme/pond#1@{SHA}"])["stdout"], "do\n")
 
     def test_tell_refuses_words_it_would_have_to_cut(self):
         self.rules(("github:acme/*", "tell"))
