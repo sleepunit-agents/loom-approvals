@@ -429,6 +429,10 @@ class Rules(unittest.TestCase):
         for c in (member, {"kind": "agent", "agent": "ada"}):
             r = ap.ui_act({"action": "rule", "caller": c, "fields": {"scope": "github:acme/*", "kind": "merge", "tier": "do"}})
             self.assertFalse(r["ok"])
+        self.assertFalse(ap.ui_act({"action": "rule", "fields": {"scope": "github:acme/*", "kind": "merge", "tier": "do"}})["ok"],
+                         "no caller is not the owner: it fails closed")
+        self.assertNotIn("rules", [x["id"] for x in ap.ui_page({"path": ""})["sections"]])
+        self.assertTrue(ap.is_owner({"caller": {"kind": "owner", "who": "jo"}}), "agents absent: unrestricted")
         self.assertEqual(self.api(["rule", "merge", T])["stdout"], "ask\n")
         for argv in (["rule", "set", "github:acme/*", "do"], ["rule-add"], ["rules"]):
             self.assertEqual(self.api(argv)["exit"], 1)

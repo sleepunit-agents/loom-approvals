@@ -891,11 +891,11 @@ def rules_section(cards):
 
 
 def is_owner(req):
-    """The household's owner (every agent's), or loom outside a household (no caller): rules are theirs alone."""
+    """The household's owner (every agent's): rules are theirs alone."""
     c = (req or {}).get("caller")
-    if c is None:
-        return True
-    return isinstance(c, dict) and c.get("kind") == "owner" and c.get("agents") == "*"
+    # Fails closed, by loom's own rule for an owner (src/ui/pieces.ts, withGrant): kind owner, agents absent or "*".
+    # No caller (a loom without a household, a run by hand) is not the owner: rules and Always are refused.
+    return isinstance(c, dict) and c.get("kind") == "owner" and c.get("agents") in (None, "*")
 
 
 def caller_who(req):
