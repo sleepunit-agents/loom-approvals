@@ -20,8 +20,10 @@ approvals list              the recent ones (the owner's view, on loom's machine
 - **TARGET** is exactly what it's for (`acme/app:octocat`, `ada->bo`). An
   approval allows that kind for that target and nothing else.
 - **--ask** is the one plain question the owner reads, the card's headline,
-  shown whole: at most 140 characters, with no ids, commit hashes, round
-  numbers or lane words. It's checked by the same lint as a task's ask
+  shown whole: at most 140 characters, one line, with no ids (a task's, a pull
+  request's, an internal one), commit hashes, round numbers, lane words, raw
+  site codes (S13) or leading tag (`pond:`). **--why** is at most 240 and the
+  if-lines 200; they may name a pull request or a task, never a hash. It's checked by the same lint as a task's ask
   (taskstore `src/plain.ts`), and refused with what's wrong and an example.
   **--why** is one line; **--if-yes** and **--if-no** say what happens either
   way, and they sit beside Allow and Deny. **--details** is longer text for

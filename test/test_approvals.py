@@ -653,6 +653,41 @@ class PlainAsks(unittest.TestCase):
         # An ask needs its why and both if-lines.
         self.assertEqual(self.ask("--ask", self.GOOD[1], "--why", "x")["exit"], 1)
 
+    def test_140_is_the_limit_and_the_headline_is_whole(self):
+        ask = ("OK to " + "move " * 40)[:139] + "?"
+        self.assertEqual(len(ask), 140)
+        argv = list(self.GOOD)
+        argv[1] = ask
+        self.assertEqual(self.ask(*argv)["exit"], 0)
+        self.assertEqual(ap.ui_manifest()["asks"][0]["text"], ask, "whole, never cut")
+        row = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]
+        self.assertEqual(row["label"], ask)
+        argv[1] = ask[:-1] + "x?"
+        self.assertEqual(self.ask(*argv, target="acme/other:octocat")["exit"], 1, "141")
+
+    def test_words_that_are_only_markup_are_no_words(self):
+        argv = list(self.GOOD)
+        argv[5] = "<>"
+        r = self.ask(*argv)
+        self.assertEqual(r["exit"], 1)
+        self.assertEqual(ap.ui_manifest()["asks"], [])
+
+    def test_a_long_hash_is_an_id_too(self):
+        self.assertTrue(ap.plain_findings("ask", "OK to push " + "ab12" * 16 + "?"))
+
+    def test_asking_again_plainly_upgrades_a_pending_card(self):
+        self.ask("--what", "lane push held", "--why", "the gate changed")
+        self.assertEqual(self.ask(*self.GOOD)["exit"], 0)
+        m = ap.ui_manifest()["asks"]
+        self.assertEqual(len(m), 1)
+        self.assertEqual((m[0]["text"], m[0]["if_yes"]), (self.GOOD[1], self.GOOD[5]))
+
+    def test_the_answered_row_leads_with_the_ask(self):
+        aid = self.ask(*self.GOOD)["stdout"].split(":")[0]
+        ap.ui_act({"action": "deny", "fields": {"id": aid}})
+        row = next(x for x in ap.ui_page({"path": ""})["sections"] if x["id"] == "answered")["blocks"][0]["items"][0]
+        self.assertEqual(row["text"], self.GOOD[1])
+
     def test_an_old_style_request_still_works_and_says_it_has_no_plain_question(self):
         r = self.ask("--what", "lane push held: the merge also changed the gate", "--why", "the gate changed")
         self.assertEqual(r["exit"], 0, r)
@@ -660,8 +695,8 @@ class PlainAsks(unittest.TestCase):
         self.assertTrue(m["text"].startswith("(no plain question given) "), m["text"])
         self.assertNotIn("if_yes", m)
 
-    def test_every_caller_example_passes_the_lint(self):
-        # The plain asks Art's callers send (~/Art/bin): each must read as a request, not a log line.
+    def test_example_asks_pass_the_lint(self):
+        # Examples of the shape callers send (each caller's own suite runs its real asks through this lint).
         for ask in ("A change to Art's sync script landed in pull request 61. OK to start updating lane prompts on loom again?",
                     "OK to run Art's reflect routine on loom's machine now?",
                     "OK for Art to push a fix to loom as Art's GitHub account?"):

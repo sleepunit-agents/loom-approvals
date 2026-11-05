@@ -291,10 +291,11 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         # The plain ask (the card's headline), with what happens either way: checked like a task's ask.
         words = {"ask": unicodedata.normalize("NFKC", str(ask)).strip(), "why": unicodedata.normalize("NFKC", str(why or "")).strip(),
                  "if_yes": unicodedata.normalize("NFKC", str(if_yes or "")).strip(), "if_no": unicodedata.normalize("NFKC", str(if_no or "")).strip()}
-        if not words["why"] or not words["if_yes"] or not words["if_no"]:
-            raise ValueError("with --ask, say --why, --if-yes and --if-no too: the owner reads what happens either way beside Allow and Deny")
         check_plain(words)
         words = {k: plain(v, 10**6) for k, v in words.items()}
+        # Checked as shown: words that are only markup or control characters leave nothing to read.
+        if not all(words[k] for k in ("ask", "why", "if_yes", "if_no")):
+            raise ValueError("with --ask, say --why, --if-yes and --if-no too, in words: the owner reads what happens either way beside Allow and Deny")
         if details:
             d = unicodedata.normalize("NFKC", str(details)).replace("\r", "")
             if len(d) > DETAILS_MAX:
@@ -313,6 +314,10 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
             if a["kind"] == kind and a["target"] == target and a["who"] == who and state_of(a) in ("pending", "allowed"):
+                # A caller that now says it plainly: a pending card takes the plain words (the owner hasn't read it yet).
+                if words and state_of(a) == "pending" and not a.get("ask"):
+                    a.update({k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v}, why=why)
+                    s.save()
                 # An allowed one counts only if the owner hasn't said no to this exact thing since.
                 if state_of(a) == "allowed" and last and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
                     continue
@@ -412,6 +417,8 @@ PLAIN_RULES = [
     ("a pull request or issue id", re.compile(r"(?<![\w./-])(?:[\w.-]+/)?[\w.-]+#\d+\b"), True),
     ("an internal id", re.compile(r"\b(?:a-[0-9a-f]{8}|cv-[0-9a-f]{6,}|dg-[0-9a-f]{6,}|w-[0-9a-f]{6,}|r-\d{3,}|h-\d+)\b", re.I), False),
     ("a hex id", re.compile(r"(?<![\w-])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{6,40}\b", re.I), False),
+    # Past taskstore's rule: a hash longer than a commit's (a sha256) is an id too.
+    ("a hex id", re.compile(r"(?<![\w-])[0-9a-f]{41,}\b", re.I), False),
     ("a round number", re.compile(r"\bround\s+\d+\b", re.I), False),
     ("a lane or wake word", re.compile(r"\b(?:nudge[- ]watch|chain[- ]check|local[- ]wake|plan[- ]night|wake (?:in|at|park|relay|list))\b", re.I), False),
     ("a raw site or unit code", re.compile(r"\b[A-Z]{1,2}\d{2,4}\b"), False),
@@ -944,7 +951,7 @@ def ui_page(req):
         sections.append(rules_section(cards))
     if past:
         sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
-            "text": f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
+            "text": a.get("ask") or f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
             "tone": {"denied": "bad", "expired": "muted"}.get(a["state"]),
         } for a in past]}]})
     if rows:
