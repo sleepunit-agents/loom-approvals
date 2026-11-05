@@ -244,7 +244,7 @@ class Approvals(unittest.TestCase):
         self.assertEqual(row["label"], "(no plain question given) Push the fix to acme/app b")
         self.assertEqual(row["value"], "Sam asked for it in #general")
         self.assertEqual(row["detail"], "Ada · just now")
-        self.assertIn("A GitHub write: acme/app:octocat", json.dumps(row["sheet"]["blocks"][-1]))
+        self.assertIn("A GitHub write: acme/app:octocat", row["sheet"]["blocks"][-1]["text"])
         buttons = [b for b in row["sheet"]["blocks"] if b["type"] == "buttons"][0]["items"]
         self.assertEqual([(b["action"], b["label"], b["fields"]) for b in buttons], [("allow", "Allow once", {"id": aid}), ("deny", "Deny", {"id": aid})])
         # No raw id in what people read: only in the record's sheet.
@@ -630,7 +630,20 @@ class PlainAsks(unittest.TestCase):
         sheet = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]["blocks"]
         self.assertEqual(sheet[0]["text"], self.GOOD[1])
         self.assertEqual(sheet[2]["items"], [{"label": "If you allow", "value": self.GOOD[5]}, {"label": "If you deny", "value": self.GOOD[7]}])
-        self.assertEqual(sheet[-1]["summary"], "Exactly what this allows")
+        self.assertTrue(sheet[-1]["text"].startswith("Exactly what this allows: "))
+        # loom refuses a details block inside a sheet (and the whole page with it): none anywhere in one.
+        page = ap.ui_page({"path": "", "caller": OWNER})
+        def sheets(x):
+            if isinstance(x, dict):
+                if "sheet" in x:
+                    yield x["sheet"]
+                for v in x.values():
+                    yield from sheets(v)
+            elif isinstance(x, list):
+                for v in x:
+                    yield from sheets(v)
+        for sh in sheets(page):
+            self.assertNotIn('"type": "details"', json.dumps(sh))
 
     def test_the_lint_refuses_ids_hashes_rounds_and_lane_words_saying_why(self):
         bad = {"t-40 needs the OAuth click": "a task id", "Merge acme/app#12?": "a pull request or issue id",
