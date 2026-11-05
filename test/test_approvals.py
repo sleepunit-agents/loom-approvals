@@ -244,7 +244,7 @@ class Approvals(unittest.TestCase):
         self.assertEqual(row["label"], "(no plain question given) Push the fix to acme/app b")
         self.assertEqual(row["value"], "Sam asked for it in #general")
         self.assertEqual(row["detail"], "Ada · just now")
-        self.assertIn("A GitHub write: acme/app:octocat", json.dumps(row["sheet"]["blocks"][-1]))
+        self.assertIn("A GitHub write: acme/app:octocat", row["sheet"]["blocks"][-1]["text"])
         buttons = [b for b in row["sheet"]["blocks"] if b["type"] == "buttons"][0]["items"]
         self.assertEqual([(b["action"], b["label"], b["fields"]) for b in buttons], [("allow", "Allow once", {"id": aid}), ("deny", "Deny", {"id": aid})])
         # No raw id in what people read: only in the record's sheet.
@@ -630,7 +630,7 @@ class PlainAsks(unittest.TestCase):
         sheet = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]["blocks"]
         self.assertEqual(sheet[0]["text"], self.GOOD[1])
         self.assertEqual(sheet[2]["items"], [{"label": "If you allow", "value": self.GOOD[5]}, {"label": "If you deny", "value": self.GOOD[7]}])
-        self.assertEqual(sheet[-1]["summary"], "Exactly what this allows")
+        self.assertTrue(sheet[-1]["text"].startswith("Exactly what this allows: "))
 
     def test_the_lint_refuses_ids_hashes_rounds_and_lane_words_saying_why(self):
         bad = {"t-40 needs the OAuth click": "a task id", "Merge acme/app#12?": "a pull request or issue id",
@@ -701,6 +701,54 @@ class PlainAsks(unittest.TestCase):
                     "OK to run Art's reflect routine on loom's machine now?",
                     "OK for Art to push a fix to loom as Art's GitHub account?"):
             self.assertEqual(ap.plain_findings("ask", ask), [], ask)
+
+
+
+class LoomPageRules(unittest.TestCase):
+    """What loom refuses a whole page for: here, a details block inside a sheet (extensions.md, "Panels")."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(ap, "STATE", Path(self.td.name))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.td.cleanup()
+
+    @staticmethod
+    def sheets(x):
+        if isinstance(x, dict):
+            if "sheet" in x:
+                yield x["sheet"]
+            for v in x.values():
+                yield from LoomPageRules.sheets(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from LoomPageRules.sheets(v)
+
+    def test_no_sheet_holds_a_details_block_in_any_state(self):
+        api = lambda argv: ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": argv}})["body"]
+        plain = ["--ask", "OK to push the fix to the app now?", "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits."]
+        ids = [api(["request", "--kind", "github-write", "--target", f"acme/r{n}:octocat", *(plain if n % 2 else []),
+                    "--what", "push it", "--why", "ready"])["stdout"].split(":")[0] for n in range(4)]
+        ap.ui_act({"action": "allow", "fields": {"id": ids[0]}})
+        ap.ui_act({"action": "deny", "fields": {"id": ids[1]}})
+        api(["request", "--kind", "merge", "--target", f"github:acme/app#1@{'a' * 40}", *plain])
+        for caller in (OWNER, {"kind": "owner", "who": "sam", "agents": ["ada"]}, None):
+            page = ap.ui_page({"path": "", **({"caller": caller} if caller else {})})
+            found = list(self.sheets(page))
+            self.assertTrue(found)
+            for sh in found:
+                self.assertNotIn('"type": "details"', json.dumps(sh), caller)
+
+    def test_the_small_print_says_kind_target_where_and_how_long(self):
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": ["request", "--kind", "github-write", "--target", "acme/app:octocat",
+              "--ask", "OK to push the fix to the app now?", "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits.", "--minutes", "30"]}})
+        self.assertEqual(r["body"]["exit"], 0)
+        line = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]["blocks"][-1]["text"]
+        self.assertEqual(line, "Exactly what this allows: A GitHub write: acme/app:octocat, from Ada's house (or a later one). "
+                               "Allowing it lets that one action through once, within 30 min.")
 
 
 class Projects(unittest.TestCase):

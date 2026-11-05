@@ -941,7 +941,8 @@ def ui_page(req):
                   if a.get("if_yes") else []),
                 {"type": "buttons", "items": answers_of(a, cards if owner else None)},
                 *([{"type": "text", "text": a["details"]}] if a.get("details") else []),
-                {"type": "details", "summary": "Exactly what this allows", "blocks": [{"type": "text", "tone": "muted", "text": fine_print(a)}]},
+                # A sheet is already folded detail: loom refuses a details block inside one, and with it the page.
+                {"type": "text", "tone": "muted", "text": f"Exactly what this allows: {fine_print(a)}"},
             ]},
         } for a in pending[:20]]}]})
     else:
