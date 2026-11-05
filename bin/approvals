@@ -401,6 +401,22 @@ def past_meta(a):
     return " · ".join(x for x in (what_of(a), f"{outcome_of(a)} {when}".strip(), f"“{a['why']}”") if x)
 
 
+RECORD_MAX = 1900   # loom refuses a block's text over 2000 characters, and with it the whole page
+
+
+def record_text(rows):
+    """The record's lines, newest first, as many as fit in one code block; then how many older ones there are."""
+    out, used = [], 0
+    for n, a in enumerate(rows):
+        line = f"{a['id']}  {a['state']}  {a['kind']}  {a['target']}  {a['who'].get('agent')}@{a['who'].get('where')}"
+        if used + len(line) + 1 > RECORD_MAX - 60:
+            out.append(f"… and {len(rows) - n} older (approvals list, on loom's machine)")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)
+
+
 def ui_page(req):
     if (req or {}).get("path", "") != "":
         return {"title": "Not found", "sections": []}
@@ -432,7 +448,7 @@ def ui_page(req):
         sections.append({"id": "record", "blocks": [{"type": "panel", "rows": [{
             "label": "The record", "value": "Each approval's id, kind and exact target",
             "sheet": {"title": "The record", "blocks": [{"type": "code", "label": "id  state  kind  target  asked from",
-                "text": "\n".join(f"{a['id']}  {a['state']}  {a['kind']}  {a['target']}  {a['who'].get('agent')}@{a['who'].get('where')}" for a in rows[:60])}]},
+                "text": record_text(rows)}]},
         }]}]})
     return {"title": "Approvals",
             "intro": "A body that hits a permission wall asks; you allow it once. It's spent by the one action it names.",

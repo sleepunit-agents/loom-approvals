@@ -263,6 +263,14 @@ class Approvals(unittest.TestCase):
         self.assertEqual(metas, {"Allowed by Pat Owner, and used just now", "Denied just now"})
         self.assertEqual({i["text"] for i in answered["items"]}, {"Ada · A GitHub write: acme/web:octocat", "Ada · A GitHub write: acme/app:octocat"})
 
+    def test_the_record_fits_loom_s_limit_however_many_there_are(self):
+        for n in range(80):
+            self.ask(target=f"acme/app-{n:02d}-with-a-longish-name:octocat")
+        page = ap.ui_page({"path": ""})
+        rec = next(s for s in page["sections"] if s["id"] == "record")["blocks"][0]["rows"][0]["sheet"]["blocks"][0]
+        self.assertLessEqual(len(rec["text"]), 2000)
+        self.assertIn("older (approvals list, on loom's machine)", rec["text"].splitlines()[-1])
+
     def test_ago_says_it_in_words(self):
         from datetime import timedelta
         t = ap.now()
