@@ -58,7 +58,7 @@ class Approvals(unittest.TestCase):
         self.assertEqual(m["asks"][0]["text"], "(no plain question given) Push the fix to acme/app b")
         self.assertNotIn("<b>", json.dumps(m))
         # In words: the wall (named by APPROVALS_KINDS), the target, where it was asked from (no house id), and why.
-        self.assertEqual(m["asks"][0]["meta"], "A GitHub write: acme/app:octocat · from Ada's house (or a later one) · “Sam asked for it in #general”")
+        self.assertEqual(m["asks"][0]["meta"], "A GitHub write: acme/app:octocat · from Ada's house, for any of Ada's own bodies · “Sam asked for it in #general”")
         self.assertEqual([b["action"] for b in m["asks"][0]["actions"]], ["allow", "deny"])
         # Waiting: nothing to spend.
         self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"])["body"]["exit"], 1)
@@ -67,16 +67,18 @@ class Approvals(unittest.TestCase):
         # Only exactly what it allowed, by who asked.
         self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/other:octocat"])["body"]["exit"], 1)
         self.assertEqual(self.api(["use", aid, "--kind", "relay", "--target", "acme/app:octocat"])["body"]["exit"], 1)
-        # Another agent, or the agent's service, can't spend what its house asked for.
+        # Another agent can't spend what this agent asked for.
         self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"],
                                   {"kind": "agent", "agent": "bo", "house": "h-8"})["body"]["exit"], 1)
-        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"],
-                                  {"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"})["body"]["exit"], 1)
-        # Nor the agent outside a house (a plain agent token), or loom's machine acting for it.
-        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"],
-                                  {"kind": "agent", "agent": "ada"})["body"]["exit"], 1)
-        self.assertEqual(ap.spender({"agent": "ada", "where": "loom's machine"})[1], "local")
-        # The agent's later house can: the one that asked is usually gone by the time it's allowed.
+        # Nor a house of a service outsiders can steer (a chat or bridge house), for what a plain house asked; and
+        # its refusal names neither the kind, the target nor where it was asked.
+        r = self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"],
+                     {"kind": "agent", "agent": "ada", "house": "h-9", "service": "chat"})
+        self.assertEqual(r["body"]["exit"], 1, r)
+        for word in ("acme", "github-write", "h-7"):
+            self.assertNotIn(word, r["body"]["stderr"])
+        # Any of the agent's own plain bodies can, wherever it asked from (the owner, 2026-11-07: "if I've given
+        # permission it doesn't matter from where or to which body"): here, a later house, once.
         ok = self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"],
                       {"kind": "agent", "agent": "ada", "house": "h-9"})
         self.assertEqual(ok["body"]["exit"], 0, ok)
@@ -84,7 +86,86 @@ class Approvals(unittest.TestCase):
         self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"])["body"]["exit"], 1)
         self.assertEqual(self.api(["check", aid])["body"]["stdout"], "used\n")
         events = [json.loads(l)["event"] for l in (Path(self.td.name) / "audit.jsonl").read_text().splitlines()]
-        self.assertEqual(events, ["request", "allow", "refused-use", "refused-use", "refused-use", "refused-use", "refused-use", "use"])
+        self.assertEqual(events, ["request", "allow", "refused-use", "refused-use", "refused-use", "refused-use", "use"])
+
+    def test_any_of_the_agent_s_bodies_spends_it_and_asking_again_from_one_is_the_same_card(self):
+        # Asked from a service's house; the continuation runs in a plain house, a plain agent token or loom's machine.
+        svc = {"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"}
+        aid = self.ask(caller=svc)
+        for other in ({"kind": "agent", "agent": "ada", "house": "h-9"}, {"kind": "agent", "agent": "ada"}):
+            self.assertEqual(self.ask(caller=other), aid, other)
+        with mock.patch.object(ap, "LOCAL_AGENT", "ada"):
+            self.assertEqual(ap.run(["request", "--kind", "github-write", "--target", "acme/app:octocat", "--what", "w", "--why", "y"]).split(":")[0], aid)
+        # Another agent's ask for the same target is its own card.
+        self.assertNotEqual(self.ask(caller={"kind": "agent", "agent": "bo", "house": "h-9"}), aid)
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        # Allowed: asking again from any of ada's bodies says so, and one spends it once.
+        r = self.api(["request", "--kind", "github-write", "--target", "acme/app:octocat", "--what", "w", "--why", "y"], {"kind": "agent", "agent": "ada", "house": "h-10"})
+        self.assertIn(f"{aid}: already allowed", r["body"]["stdout"])
+        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"], {"kind": "agent", "agent": "bo", "house": "h-10"})["body"]["exit"], 1)
+        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"], {"kind": "agent", "agent": "ada", "house": "h-10"})["body"]["exit"], 0)
+        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"], svc)["body"]["exit"], 1)
+
+    def test_a_service_house_spends_only_what_its_own_service_asked_for(self):
+        chat = {"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"}
+        aid = self.ask(caller=chat)
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        # Another service's house can't, and asking from it is its own card.
+        bridge = {"kind": "agent", "agent": "ada", "house": "h-9", "service": "bridge"}
+        self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"], bridge)["body"]["exit"], 1)
+        self.assertNotEqual(self.ask(caller=bridge), aid)
+        self.assertEqual(self.api(["check", aid, "--json"], bridge)["body"]["exit"], 1)
+        # A later house of the same service can.
+        ok = self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"], {**chat, "house": "h-10"})
+        self.assertEqual(ok["body"]["exit"], 0, ok)
+        # What a plain house asked for is a service house's own card, never the plain one.
+        plain = self.ask(target="acme/other:octocat", caller={"kind": "agent", "agent": "ada", "house": "h-11"})
+        self.assertNotEqual(self.ask(target="acme/other:octocat", caller=chat), plain)
+
+    def test_another_agent_learns_nothing_of_what_it_is_for_from_use(self):
+        aid = self.ask(target="acme/secret-repo:octocat")
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        r = self.api(["use", aid, "--kind", "x", "--target", "y"], {"kind": "agent", "agent": "bo", "house": "h-9"})
+        self.assertEqual(r["body"]["exit"], 1)
+        for word in ("acme", "github-write", "h-7", "ada"):
+            self.assertNotIn(word, r["body"]["stderr"])
+
+    def test_another_body_asking_again_gets_the_card_but_doesn_t_reword_it(self):
+        aid = self.ask(caller={"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"})
+        r = self.api(["request", "--kind", "github-write", "--target", "acme/app:octocat", "--ask", "OK to push the fix to the app now?",
+                      "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits."], {"kind": "agent", "agent": "ada", "house": "h-9"})
+        self.assertTrue(r["body"]["stdout"].startswith(aid), r)
+        self.assertNotIn("ask", ap.get(aid))
+
+    def test_only_the_piece_spends_a_wake_approval_and_a_body_s_try_leaves_it_allowed(self):
+        aid = ap.run(["request", "--kind", "local-wake", "--target", "ada:0123456789abcdef", "--what", "run X", "--why", "y",
+                      "--as", json.dumps(HOUSE)]).split(":")[0]
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        r = self.api(["use", aid, "--kind", "local-wake", "--target", "ada:0123456789abcdef"], {"kind": "agent", "agent": "ada", "house": "h-9"})
+        self.assertEqual(r["body"]["exit"], 1, r)
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        self.assertEqual(ap.run(["use", aid, "--kind", "local-wake", "--target", "ada:0123456789abcdef", "--as", json.dumps({**HOUSE, "house": "h-9"})]),
+                         f"{aid}: used\n")
+
+    def test_check_json_tells_the_agent_that_asked_exactly_what_to_spend_it_on(self):
+        aid = self.ask(caller={"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"})
+        r = self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})
+        self.assertEqual(r["body"]["exit"], 0, r)
+        got = json.loads(r["body"]["stdout"])
+        self.assertEqual(got, {"id": aid, "agent": "ada", "state": "pending", "kind": "github-write", "target": "acme/app:octocat", "expires": None})
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        got = json.loads(self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})["body"]["stdout"])
+        self.assertEqual(got["state"], "allowed")
+        self.assertTrue(got["expires"])
+        # Another agent reads only the state, as plain check gives anyone: not what it's for.
+        r = self.api(["check", aid, "--json"], {"kind": "agent", "agent": "bo", "house": "h-9"})
+        self.assertEqual(r["body"]["exit"], 1, r)
+        self.assertEqual(self.api(["check", aid], {"kind": "agent", "agent": "bo", "house": "h-9"})["body"]["stdout"], "allowed\n")
+        # A piece on loom's machine reads it for the body it acts for (--as), never over the API.
+        self.assertEqual(json.loads(ap.run(["check", aid, "--json", "--as", json.dumps(HOUSE)]))["target"], "acme/app:octocat")
+        self.assertEqual(self.api(["check", aid, "--json", "--as", json.dumps(HOUSE)])["body"]["exit"], 1)
+        with self.assertRaises(PermissionError):
+            ap.run(["check", aid, "--json", "--as", json.dumps({"kind": "agent", "agent": "bo", "house": "h-1"})])
 
     def test_an_answer_records_the_member_loom_names(self):
         aid = self.ask()
@@ -216,11 +297,11 @@ class Approvals(unittest.TestCase):
 
     def test_a_wake_on_loom_s_machine_reads_as_one_without_its_key(self):
         a = {"kind": "local-wake", "target": "ada:0123456789abcdef", "why": "DNS check", "who": {"agent": "ada", "where": "h-306 (chat-bodies)"}}
-        self.assertEqual(ap.meta_of(a), "A wake on loom's machine · from Ada's chat bodies house (or a later one) · “DNS check”")
+        self.assertEqual(ap.meta_of(a), "A wake on loom's machine · from Ada's chat bodies house, for any of Ada's own bodies or its chat bodies houses · “DNS check”")
 
     def test_an_unnamed_kind_reads_as_words(self):
         a = {"kind": "deploy-gate", "target": "acme/app", "why": "ship", "who": {"agent": "ada", "where": "a body"}}
-        self.assertEqual(ap.meta_of(a), "Deploy gate: acme/app · from a body · “ship”")
+        self.assertEqual(ap.meta_of(a), "Deploy gate: acme/app · from a body, for any of Ada's own bodies · “ship”")
 
     def test_the_manifest_has_a_tab_so_its_links_land_on_a_page(self):
         # Without a tab loom serves no /p/approvals: every ask's and answered row's page "" was a dead link.
@@ -773,7 +854,7 @@ class LoomPageRules(unittest.TestCase):
               "--ask", "OK to push the fix to the app now?", "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits.", "--minutes", "30"]}})
         self.assertEqual(r["body"]["exit"], 0)
         line = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]["blocks"][-1]["text"]
-        self.assertEqual(line, "Exactly what this allows: A GitHub write: acme/app:octocat, from Ada's house (or a later one). "
+        self.assertEqual(line, "Exactly what this allows: A GitHub write: acme/app:octocat, from Ada's house, for any of Ada's own bodies. "
                                "Allowing it lets that one action through once, within 30 min.")
 
 
