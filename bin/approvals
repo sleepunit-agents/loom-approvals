@@ -260,12 +260,23 @@ def who_of(caller):
     raise PermissionError("only an agent's bodies ask (the owner answers on the page)")
 
 
-def spender(who):
-    """What has to match to spend an approval: the agent. Not which house, nor the kind of place it asked from, nor its
-    service: the owner (2026-11-07), "if I've given permission it doesn't matter from where or to which body". A parked
-    body's continuation runs in a later house, often a plain one when a service's house asked. The action itself is
-    pinned by kind and exact target, spent once, within its expiry, and a later deny overrules it."""
-    return who.get("agent")
+def service_of(who):
+    """The service a house serves (a chat or bridge house: "h-12 (discord-bodies)"), or None for a plain one."""
+    m = re.search(r"\(([^()]*)\)$", who.get("where", ""))
+    return m.group(1) if m else None
+
+
+def may_spend(asked, who):
+    """Whether `who` may spend (or re-ask, or read) what `asked` asked for. The owner (2026-11-07): "if I've given
+    permission it doesn't matter from where or to which body", for the agent's own bodies: a parked body's continuation
+    runs in a later house, often a plain one when a service's house asked. A service's house is one that people other
+    than the owner can steer (a chat or bridge house serving them), so it spends only what its own service asked for.
+    Plain houses, a body outside a house and loom's machine match on the agent alone. The action itself is pinned by
+    kind and exact target, spent once, within its expiry, and a later deny overrules it."""
+    if asked.get("agent") != who.get("agent"):
+        return False
+    svc = service_of(who)
+    return svc is None or svc == service_of(asked)
 
 
 DETAILS_MAX = 1000
@@ -322,7 +333,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
-            if a["kind"] == kind and a["target"] == target and spender(a["who"]) == spender(who) and state_of(a) in ("pending", "allowed"):
+            if a["kind"] == kind and a["target"] == target and may_spend(a["who"], who) and state_of(a) in ("pending", "allowed"):
                 # A caller that now says it plainly: a pending card takes the plain words (the owner hasn't read it yet).
                 # Only the body the card names, so the words the owner reads are the ones its "from" says.
                 if words and state_of(a) == "pending" and not a.get("ask") and a["who"] == who:
@@ -363,8 +374,8 @@ def spend_card(caller, aid):
     from plain check, never what it's for. Reading spends nothing and widens nothing; use still checks all of it."""
     who = who_of(caller)
     a = get(aid)
-    if spender(a["who"]) != spender(who):
-        raise PermissionError(f"{aid} isn't {who['agent']}'s; check {aid} gives its state")
+    if not may_spend(a["who"], who):
+        raise PermissionError(f"{aid} isn't {who['agent']}'s to read here; check {aid} gives its state")
     return {"id": a["id"], "agent": a["who"].get("agent"), "state": a["state"], "kind": a["kind"], "target": a["target"],
             "expires": a.get("expires") if a["state"] == "allowed" else None}
 
@@ -381,6 +392,11 @@ def use(caller, aid, kind, target, acting_for=False):
         a = s.d["approvals"].get(aid)
         if not a:
             raise LookupError(f"no approval {aid}")
+        # Who first, and saying nothing of what it's for or where it was asked: an id alone tells nobody else its
+        # kind or target. The agent that asked spends it from any of its own bodies (may_spend).
+        if not may_spend(a["who"], who):
+            s.log("refused-use", a, who_used=who)
+            raise PermissionError(f"{aid} isn't {who['agent']}'s to spend from here")
         st = state_of(a)
         if st != "allowed":
             raise PermissionError(f"{aid} is {st}" + (", waiting on the owner" if st == "pending" else ""))
@@ -391,12 +407,6 @@ def use(caller, aid, kind, target, acting_for=False):
         if last and last["id"] != aid and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
             s.log("refused-use", a, denied_by=last["id"])
             raise PermissionError(f"{aid} was overruled: the owner said no to {target} after ({last['id']})")
-        # The agent that asked spends it, from any of its bodies: the house that asked is usually gone by the time the
-        # owner answers, hours later, and the agent's next body is the one that carries on. The action itself is pinned
-        # by kind and target.
-        if spender(a["who"]) != spender(who):
-            s.log("refused-use", a, who_used=who)
-            raise PermissionError(f"{aid} was asked by {a['who']['agent']} in {a['who']['where']}, not by {who['agent']} in {who['where']}")
         a["state"], a["used"] = "used", iso(now())
         s.save()
         s.log("use", a)
@@ -891,7 +901,9 @@ def kind_of(a):
 
 def from_of(a):
     """Where it was asked from, and who may spend it: any of the agent's bodies (spender)."""
-    bodies = f"for any of {name_of(a['who'].get('agent'))}'s bodies"
+    name = name_of(a['who'].get('agent'))
+    svc = service_of(a["who"])
+    bodies = f"for any of {name}'s own bodies" + (f" or its {svc.replace('-', ' ')} houses" if svc else "")
     return bodies if a["who"].get("where") == "any" else f"from {place_of(a['who'])}, {bodies}"
 
 

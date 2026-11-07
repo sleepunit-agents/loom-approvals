@@ -36,15 +36,18 @@ approvals list              the recent ones (the owner's view, on loom's machine
   never cut, so nothing can hide past the part the owner reads.
 - An allowed approval lasts **--minutes** (60 by default, 8 hours at most),
   and is spent by the first `use` that matches it.
-- **Who spends it** is the agent that asked, from any of its bodies: any
-  house, a service's house, a body outside a house, or loom's machine acting
-  for it. The owner's rule: once allowed, it doesn't matter where it was asked
-  from or which body carries on (the one that asked is usually gone by the
-  time the owner answers). Another agent never spends it. What it allows stays
+- **Who spends it** is the agent that asked, from any of its own bodies: any
+  plain house, a body outside a house, or loom's machine acting for it. The
+  owner's rule: once allowed, it doesn't matter where it was asked from or
+  which of the agent's bodies carries on (the one that asked is usually gone
+  by the time the owner answers). A service's house (a chat or bridge house,
+  which people other than the owner can steer) spends, re-asks and reads only
+  what its own service asked for. Another agent never spends it, and a
+  refusal tells it nothing of what the approval is for. What it allows stays
   pinned: that kind, that exact target, once, before it expires, and a later
   deny of the same thing overrules it.
-- Asking again for the same thing, while it's pending or allowed, from any of
-  the agent's bodies, is the same card.
+- Asking again for the same thing, while it's pending or allowed, from a body
+  that could spend it, is the same card.
 - `approvals check ID --json` gives the agent that asked its state and the
   exact kind and target to spend it on, so a parked body's continuation
   (loom's clock, `wake park`) spends it without asking again. Another agent
