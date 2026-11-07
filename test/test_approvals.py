@@ -995,6 +995,16 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertEqual(self.rule("loren", t), f"ask allowed {g2}")
         self.assertEqual(self.api(["use", g2, "--kind", "merge", "--target", t], "loren")["exit"], 0)
 
+    def test_the_owner_s_answer_for_himself_isn_t_the_answer_to_someone_else_s_request(self):
+        t = f"github:acme/app#8@{SHA}"
+        g = ap.run(["grant", "--kind", "merge", "--target", t, "--for", "ada", "--by", "jonathan-barket"]).split(":")[0]
+        r = self.api(["request", "--kind", "merge", "--target", t, "--ask", "OK to merge the fix?", "--why", "Green.",
+                      "--if-yes", "I merge it.", "--if-no", "It waits."], "loren")
+        self.assertIn("asked the owner", r["stdout"], "Loren's request is a new card, not the owner's granted one")
+        self.assertNotIn(g, r["stdout"])
+        mine = self.api(["request", "--kind", "merge", "--target", t, "--what", "merge it", "--why", "green"], "owner")
+        self.assertIn(f"{g}: already allowed", mine["stdout"])
+
     def test_a_deny_wins_whoever_it_was_for(self):
         mine = self.ask_merge("owner", f"github:acme/app#7@{SHA}")
         ap.ui_act({"action": "allow", "fields": {"id": mine}})
