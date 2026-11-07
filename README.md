@@ -104,7 +104,11 @@ for that person, or it asks.
   `--on-behalf <whom the wake is for>`; only a local `--as` call may say that,
   and it's held to it. **The runtime's relay** spends a relay approval with
   `--as` and no `--on-behalf` (it has no conversation to ask about): then
-  everything is checked but whom it was for. A relay carries none of the
+  everything is checked but whom it was for. That's for a relay only: any other
+  kind a piece files or spends without `--on-behalf` is someone loom can't name.
+  In a house, the bin itself (rarely run there: `piece-call` is) fetches its
+  statement with the house's `loom-runtime`, and keeps a supplied one if that
+  fails. A relay carries none of the
   owner's authority to the agent it reaches.
 
 ## Standing rules

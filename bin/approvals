@@ -230,6 +230,7 @@ class Store:
         return self._grants
 
     def replace_rules(self, rules, grants=None):
+        self.rules()        # the grants are read with the rules: an edit of one never writes the other away
         if self.rules_broken:
             raise ValueError("rules.json can't be read as it is; fix or remove it on loom's machine before changing a rule")
         self._rules = rules
@@ -357,7 +358,7 @@ def fetch_statement(conversation):
         return None
     st = r.get("statement") if isinstance(r, dict) and r.get("ok") is True else None
     # Opaque: the runtime's to read (--verify). One word, of a size a command line carries.
-    return st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None
+    return st if isinstance(st, str) and 0 < len(st) <= 1100 and not re.search(r"\s", st) else None
 
 
 def for_of(a):
@@ -905,7 +906,9 @@ def grant(kind, target, agent, by, deny=False, person=OWNER):
     """The owner's answer from loom's machine (the Changes piece's Yes and Not yet): answers the agent's pending
     request for TARGET, or makes the answer for one it hasn't made yet. For the owner's own work unless --person names
     whom it's for (t-1943): a yes for himself is never one for someone else."""
-    person = OWNER if person == OWNER else str(person or "").strip().lower()
+    raw, person = person, OWNER if person == OWNER else str(person or "").strip().lower()
+    if raw != OWNER and person == OWNER:
+        raise ValueError("--person owner is the owner's own work: leave --person out")
     if person != OWNER and not (PERSON.fullmatch(person) and len(person) <= 80):
         raise ValueError("--person is the slug of whom it's for")
     if kind != "merge" or not repo_of(target):
@@ -1018,7 +1021,8 @@ def notice_of(n):
     tgt = n.get("target", "")
     r = repo_of(tgt)
     change = f"{r['locator']}#{r['number']}" if r else tgt.split("@")[0]
-    return {"text": f"{name_of(n.get('agent'))} merged {change}", "meta": n.get("what") or "under a tell me after rule",
+    whose = f" for {person_name(n['for'])}" if n.get("for") and n["for"] != OWNER else ""
+    return {"text": f"{name_of(n.get('agent'))} merged {change}{whose}", "meta": n.get("what") or "under a tell me after rule",
             "at": n["at"], "agent": n.get("agent"), "page": ""}
 
 
@@ -1051,7 +1055,9 @@ def ask_detail(a):
 def fine_print(a):
     """Exactly what Allow allows: the kind and target (machine fields), where it was asked from, for whom, for how long."""
     fw = for_words(a)
-    whose = f" It's for {fw}, not for you: it's spent only for {fw}." if fw else ""
+    named = a.get("people") or []
+    everyone = f" ({', '.join(person_name(p) for p in named)})" if len(named) > 3 else ""
+    whose = f" It's for {fw}{everyone}, not for you: it's spent only for {fw}." if fw else ""
     return f"{kind_of(a)}, {from_of(a)}.{whose} Allowing it lets that one action through once, within {a['minutes']} min."
 
 
@@ -1394,7 +1400,7 @@ def api_answer(req):
     if caller.get("kind") != "agent":
         return refuse(403, "only an agent's bodies ask here; the owner answers on the page")
     argv = (req.get("body") or {}).get("argv")
-    if not isinstance(argv, list) or not 1 <= len(argv) <= 24 or not all(isinstance(a, str) and len(a) <= 1100 for a in argv):
+    if not isinstance(argv, list) or not 1 <= len(argv) <= 26 or not all(isinstance(a, str) and len(a) <= 1100 for a in argv):
         return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID [--json] | use ID --kind K --target T"
                            " | rule merge TARGET | tell --kind merge --target TARGET --what W")
     try:
@@ -1489,7 +1495,8 @@ def run(argv, caller=None):
     if a.cmd == "use":
         # Over the API (a body) only with no wake kind; on loom's machine (the clock, with or without --as) any.
         use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller, statement=statement, on_behalf=a.on_behalf or None,
-            unstated=bool(a.as_) and not a.on_behalf)
+            # Only the runtime's relay may leave whom unsaid (t-1953); any other kind a piece spends says it, or is held to unknown.
+            unstated=bool(a.as_) and not a.on_behalf and a.kind == "relay")
         return f"{a.id}: used\n"
     if a.cmd == "rule":
         return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement)
@@ -1565,8 +1572,8 @@ def main():
         if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.fullmatch(conv):
             args = [*args, "--conversation", conv]
         # On whose behalf (t-1943): the runtime's statement, as piece-call adds it; a typed one is dropped.
-        args, _ = take_principal(args)
-        st = fetch_statement(conv) if CONVERSATION.fullmatch(conv) and args else None
+        args, typed = take_principal(args)
+        st = (fetch_statement(conv) if CONVERSATION.fullmatch(conv) and args else None) or typed
         forward("approvals", args + (["--principal", st] if st else []))
     if args[:1] == ["ui"]:
         rest = [a for a in args[1:] if a != "--json"]

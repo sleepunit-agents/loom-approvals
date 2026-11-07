@@ -1081,6 +1081,43 @@ class OnWhoseBehalf(unittest.TestCase):
         with self.assertRaises(ValueError):
             ap.grant("merge", self.ON_POND, "ada", None, person="owner-x Y")
 
+    def test_editing_a_rule_keeps_every_grant_and_editing_a_grant_keeps_every_rule(self):
+        self.grant("loren", "github:onterris/*", "do")
+        self.assertTrue(ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "github:acme/*", "tier": "tell"}})["ok"])
+        self.assertEqual(self.rule("loren"), "do", "the grant survived a rule edit")
+        with ap.Store() as s:     # a fresh store, the rule edit straight away (nothing read before it)
+            s.replace_rules([ap.make_rule("merge", "github:onterris/*", "do", "t")])
+        self.assertEqual(self.rule("loren"), "do")
+        self.grant("dan", "github:onterris/*", "tell")
+        self.assertEqual(self.rule("owner"), "do", "the rules survived a grant edit")
+
+    def test_only_a_relay_is_spent_by_a_piece_without_saying_whom(self):
+        aid = self.ask_merge("loren")
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "merge", "--target", self.ON_POND, "--as", json.dumps(HOUSE)])
+        self.assertEqual(ap.run(["use", aid, "--kind", "merge", "--target", self.ON_POND, "--as", json.dumps(HOUSE), "--on-behalf", "loren"]), f"{aid}: used\n")
+        # And a piece filing without saying whom is someone loom can't name, never the owner.
+        out = ap.run(["request", "--kind", "local-wake", "--target", "ada:abc", "--what", "w", "--why", "y", "--as", json.dumps(HOUSE)])
+        self.assertEqual(ap.get(out.split(":")[0])["for"], ap.UNKNOWN)
+
+    def test_a_body_can_t_say_on_whose_behalf_over_the_api(self):
+        r = self.api(["request", "--kind", "merge", "--target", self.ON_POND, "--what", "w", "--why", "y", "--on-behalf", "owner"], "loren")
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("--on-behalf is for a piece", r["stderr"])
+        r = self.api(["request", "--kind", "merge", "--target", self.ON_POND, "--what", "w", "--why", "y", "--on-behalf", "owner",
+                      "--as", json.dumps(HOUSE)], "loren")
+        self.assertEqual(r["exit"], 1, "nor with --as")
+
+    def test_the_fyi_says_whom_and_a_crowded_card_names_everyone(self):
+        self.grant("loren", "github:onterris/on-pond", "tell")
+        self.api(["tell", "--kind", "merge", "--target", self.ON_POND, "--what", "merged the alarm fix"], "loren")
+        self.assertEqual(ap.ui_manifest()["notices"][0]["text"], "Ada merged onterris/on-pond#220 for Loren")
+        many = ap.get(self.ask_merge("a,b,c,d,e", f"github:onterris/on-pond#231@{SHA}"))
+        self.assertIn("(A, B, C, D, E)", ap.fine_print(many))
+        with self.assertRaises(ValueError):
+            ap.grant("merge", self.ON_POND, "ada", None, person=" Owner ")
+
     def test_the_statement_is_taken_off_the_argv_and_never_kept(self):
         self.assertEqual(ap.take_principal(["rule", "--principal", "a", "merge", "--principal", "b"]), (["rule", "merge"], "b"))
         self.assertEqual(ap.take_principal(["rule", "--principal", "a", "--principal=c"]), (["rule"], "c"))
