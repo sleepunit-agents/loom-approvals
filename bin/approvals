@@ -369,8 +369,12 @@ def spend_card(caller, aid):
             "expires": a.get("expires") if a["state"] == "allowed" else None}
 
 
-def use(caller, aid, kind, target):
+def use(caller, aid, kind, target, acting_for=False):
     """Spend an allowed approval for exactly the action it allowed. True once."""
+    if kind in PIECE_KINDS and not acting_for:
+        # Spent by the piece that runs it (the clock sets the wake), never by a body: a body's own `use` would
+        # spend the owner's yes and run nothing.
+        raise PermissionError(f"a {kind} approval is spent by the piece on loom's machine that runs it, not by a body")
     who = who_of(caller)
     target = exact_target(target)
     with Store() as s:
@@ -1181,7 +1185,8 @@ def run(argv, caller=None):
             return json.dumps(spend_card(caller, a.id)) + "\n"
         return get(a.id)["state"] + "\n"
     if a.cmd == "use":
-        use(caller, a.id, a.kind, a.target)
+        # Over the API (a body) only with no wake kind; on loom's machine (the clock, with or without --as) any.
+        use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller)
         return f"{a.id}: used\n"
     if a.cmd == "rule":
         return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json)

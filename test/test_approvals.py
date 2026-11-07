@@ -106,6 +106,16 @@ class Approvals(unittest.TestCase):
         self.assertTrue(r["body"]["stdout"].startswith(aid), r)
         self.assertNotIn("ask", ap.get(aid))
 
+    def test_only_the_piece_spends_a_wake_approval_and_a_body_s_try_leaves_it_allowed(self):
+        aid = ap.run(["request", "--kind", "local-wake", "--target", "ada:0123456789abcdef", "--what", "run X", "--why", "y",
+                      "--as", json.dumps(HOUSE)]).split(":")[0]
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        r = self.api(["use", aid, "--kind", "local-wake", "--target", "ada:0123456789abcdef"], {"kind": "agent", "agent": "ada", "house": "h-9"})
+        self.assertEqual(r["body"]["exit"], 1, r)
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        self.assertEqual(ap.run(["use", aid, "--kind", "local-wake", "--target", "ada:0123456789abcdef", "--as", json.dumps({**HOUSE, "house": "h-9"})]),
+                         f"{aid}: used\n")
+
     def test_check_json_tells_the_agent_that_asked_exactly_what_to_spend_it_on(self):
         aid = self.ask(caller={"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"})
         r = self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})

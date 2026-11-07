@@ -48,7 +48,9 @@ approvals list              the recent ones (the owner's view, on loom's machine
 - `approvals check ID --json` gives the agent that asked its state and the
   exact kind and target to spend it on, so a parked body's continuation
   (loom's clock, `wake park`) spends it without asking again. Another agent
-  gets only the state, from plain `check`.
+  gets only the state, from plain `check`. A wake approval (`local-wake`) is
+  spent only by the piece that runs it on loom's machine (the clock), never by
+  a body's own `use`, which would use up the yes and run nothing.
 
 Nothing here grants by itself: a body may be steered, so only the owner's
 Allow on the page makes an approval spendable.
