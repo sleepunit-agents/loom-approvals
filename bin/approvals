@@ -8,6 +8,7 @@
                                 --details longer text for the sheet. --what alone (the old form) still works, and
                                 its card says "(no plain question given)" so the caller gets fixed.
     approvals check ID          pending | allowed | denied | used | expired
+    approvals check ID --json   for the agent that asked: its state and the exact kind and target to spend it on
     approvals use ID --kind KIND --target TARGET
                                 spend an allowed approval: once, for exactly that kind and target
     approvals list              the recent ones (the owner's view, on loom's machine)
@@ -260,13 +261,11 @@ def who_of(caller):
 
 
 def spender(who):
-    """What has to match to spend an approval: the agent, the kind of place it asked from
-    (a house, loom's machine, or a body outside a house), and its service if a service
-    asked. Only which house is relaxed: houses are short-lived, so a later one may spend it."""
-    where = who.get("where", "")
-    m = re.search(r"\(([^()]*)\)$", where)
-    place = "house" if re.match(r"h-[0-9]+\b", where) else "local" if where == "loom's machine" else "body"
-    return (who.get("agent"), place, m.group(1) if m else None)
+    """What has to match to spend an approval: the agent. Not which house, nor the kind of place it asked from, nor its
+    service: the owner (2026-11-07), "if I've given permission it doesn't matter from where or to which body". A parked
+    body's continuation runs in a later house, often a plain one when a service's house asked. The action itself is
+    pinned by kind and exact target, spent once, within its expiry, and a later deny overrules it."""
+    return who.get("agent")
 
 
 DETAILS_MAX = 1000
@@ -319,10 +318,11 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
                          "and why: the owner reads them to decide")
     mins = DEFAULT_MIN if not minutes else max(1, min(int(minutes), MAX_MIN))
     with Store() as s:
-        # Asking again for the same thing is the same card.
+        # Asking again for the same thing is the same card, from any of the agent's bodies (use's rule): a parked body's
+        # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
-            if a["kind"] == kind and a["target"] == target and a["who"] == who and state_of(a) in ("pending", "allowed"):
+            if a["kind"] == kind and a["target"] == target and spender(a["who"]) == spender(who) and state_of(a) in ("pending", "allowed"):
                 # A caller that now says it plainly: a pending card takes the plain words (the owner hasn't read it yet).
                 if words and state_of(a) == "pending" and not a.get("ask"):
                     a.update({k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v}, why=why)
@@ -356,6 +356,19 @@ def get(aid):
         return {**a, "state": state_of(a)}
 
 
+def spend_card(caller, aid):
+    """What a parked body's continuation needs to spend its own approval without asking again: its state, and the
+    exact kind and target `use` takes, as filed. Only for the agent that asked (spender): another agent gets its state
+    from plain check, never what it's for. Reading spends nothing and widens nothing; use still checks all of it."""
+    who = who_of(caller)
+    a = get(aid)
+    if spender(a["who"]) != spender(who):
+        raise PermissionError(f"{aid} isn't {who['agent']}'s; check {aid} gives its state")
+    return {"id": a["id"], "state": a["state"], "kind": a["kind"], "target": a["target"],
+            "expires": a.get("expires") if a["state"] == "allowed" else None,
+            "ask": a.get("ask") or a.get("what"), "asked_at": a.get("at")}
+
+
 def use(caller, aid, kind, target):
     """Spend an allowed approval for exactly the action it allowed. True once."""
     who = who_of(caller)
@@ -374,12 +387,10 @@ def use(caller, aid, kind, target):
         if last and last["id"] != aid and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
             s.log("refused-use", a, denied_by=last["id"])
             raise PermissionError(f"{aid} was overruled: the owner said no to {target} after ({last['id']})")
-        # The agent that asked spends it, from any of its houses: the house that asked is
-        # usually gone by the time the owner answers, hours later, and the agent's next house
-        # is the one that carries on. The action itself is pinned by kind and target.
-        # An owner's grant (approvals grant) was asked from no place, so only the agent is matched.
-        mine = a["who"].get("agent") == who.get("agent") if a.get("granted") else spender(a["who"]) == spender(who)
-        if not mine:
+        # The agent that asked spends it, from any of its bodies: the house that asked is usually gone by the time the
+        # owner answers, hours later, and the agent's next body is the one that carries on. The action itself is pinned
+        # by kind and target.
+        if spender(a["who"]) != spender(who):
             s.log("refused-use", a, who_used=who)
             raise PermissionError(f"{aid} was asked by {a['who']['agent']} in {a['who']['where']}, not by {who['agent']} in {who['where']}")
         a["state"], a["used"] = "used", iso(now())
@@ -775,13 +786,12 @@ def place_of(who):
 
 
 def meta_of(a):
-    """What it is, where it was asked from, and why: "A wake on loom's machine · from Ada's chat house (or a
-    later one) · “…”". A target that's only a key for loom (a wake's agent:hash) is left out; a real one (a repo) stays."""
+    """What it is, where it was asked from, and why: "A wake on loom's machine · from Ada's chat house, for any of
+    Ada's bodies · “…”". A target that's only a key for loom (a wake's agent:hash) is left out; a real one (a repo) stays."""
     kind = KIND_WORDS.get(a["kind"], a["kind"].replace("-", " ").capitalize())
     # Only a wake's target is an internal key (agent:hash); every other kind's target is shown, whatever it looks like.
     target = None if a["kind"] == "local-wake" and re.fullmatch(r"[a-z][a-z0-9-]*:[0-9a-f]{8,}", a["target"] or "") else a["target"]
-    later = " (or a later one)" if spender(a["who"])[1] == "house" else ""
-    return " · ".join(x for x in (kind + (f": {target}" if target else ""), f"from {place_of(a['who'])}{later}", f"“{a['why']}”") if x)
+    return " · ".join(x for x in (kind + (f": {target}" if target else ""), from_of(a), f"“{a['why']}”") if x)
 
 
 def notices():
@@ -876,8 +886,8 @@ def kind_of(a):
 
 
 def from_of(a):
-    later = " (or a later one)" if spender(a["who"])[1] == "house" else ""
-    return f"from {place_of(a['who'])}{later}"
+    """Where it was asked from, and who may spend it: any of the agent's bodies (spender)."""
+    return f"from {place_of(a['who'])}, for any of {name_of(a['who'].get('agent'))}'s bodies"
 
 
 def always_scope(a, cards):
@@ -1101,7 +1111,7 @@ def api_answer(req):
         return refuse(403, "only an agent's bodies ask here; the owner answers on the page")
     argv = (req.get("body") or {}).get("argv")
     if not isinstance(argv, list) or not 1 <= len(argv) <= 24 or not all(isinstance(a, str) and len(a) <= 1100 for a in argv):
-        return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID | use ID --kind K --target T"
+        return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID [--json] | use ID --kind K --target T"
                            " | rule merge TARGET | tell --kind merge --target TARGET --what W")
     try:
         out = run(argv, caller)
@@ -1120,7 +1130,10 @@ def run(argv, caller=None):
     r.add_argument("--if-yes", dest="if_yes", default="")
     r.add_argument("--if-no", dest="if_no", default="")
     r.add_argument("--as", dest="as_", default="")
-    sub.add_parser("check", add_help=False, exit_on_error=False).add_argument("id")
+    c = sub.add_parser("check", add_help=False, exit_on_error=False)
+    c.add_argument("id")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--as", dest="as_", default="")
     u = sub.add_parser("use", add_help=False, exit_on_error=False)
     u.add_argument("id")
     u.add_argument("--kind", default="")
@@ -1144,7 +1157,7 @@ def run(argv, caller=None):
         a = ap.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
         raise ValueError(f"usage: {e}") from None
-    if a.cmd in ("request", "use") and a.as_:
+    if a.cmd in ("request", "use", "check") and a.as_:
         # A piece on loom's machine acting for a body (the clock filing or spending a house's
         # approval) names it with --as; only a local call may say so.
         if caller:
@@ -1163,6 +1176,8 @@ def run(argv, caller=None):
             return f"{x['id']}: already allowed (until {x['expires']}); use it: approvals use {x['id']} --kind {x['kind']} --target '{x['target']}'\n"
         return f"{x['id']}: asked the owner (a card on loom's Home); check it: approvals check {x['id']}\n"
     if a.cmd == "check":
+        if a.json:
+            return json.dumps(spend_card(caller, a.id)) + "\n"
         return get(a.id)["state"] + "\n"
     if a.cmd == "use":
         use(caller, a.id, a.kind, a.target)
