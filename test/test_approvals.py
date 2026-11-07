@@ -41,11 +41,14 @@ def fake_verify(statement):
         return {"ok": True, "agent": agent, "for": "jonathan", "owner": True, "people": []}
     if f == "?":
         return {"ok": True, "agent": agent, "for": None, "owner": False, "people": []}
+    if f.startswith("@"):      # a person by this name, not the owner
+        return {"ok": True, "agent": agent, "for": f[1:], "owner": False, "people": [f[1:]]}
     people = f.split(",")
     return {"ok": True, "agent": agent, "for": people[0] if len(people) == 1 else None, "owner": False, "people": people}
 
 
 # Every test runs with the fake runtime; a call that's the owner's own work says so, as a house's piece-call would.
+REAL_VERIFY = ap.verify_statement
 ap.verify_statement = fake_verify
 AS_OWNER = ["--principal", "S:ada:owner"]
 
@@ -253,10 +256,11 @@ class Approvals(unittest.TestCase):
         # Over the API, --as is refused: a body can't claim to be another.
         self.assertEqual(self.api(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)],
                                   {"kind": "agent", "agent": "ada", "house": "h-9"})["body"]["exit"], 1)
-        # Spent for whom it was asked: the piece says so (--on-behalf); without it, someone loom can't name, so no.
+        # A piece that says on whose behalf (the clock) is held to it: the owner's yes isn't spent for Loren.
         with self.assertRaises(PermissionError):
-            ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)])
-        self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "owner"]), f"{aid}: used\n")
+            ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "loren"])
+        # The runtime's relay can't say (it has no conversation to ask about): everything else is checked.
+        self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)]), f"{aid}: used\n")
 
     def test_a_piece_may_file_a_request_for_the_body_it_acts_for_locally(self):
         out = ap.run(["request", "--kind", "local-wake", "--target", "ada:abc", "--what", "run X", "--why", "y", "--as", json.dumps(HOUSE)])
@@ -761,10 +765,13 @@ class PlainAsks(unittest.TestCase):
         with mock.patch.object(ap, "in_a_house", return_value=True), \
              mock.patch.object(ap, "forward", side_effect=lambda piece, argv: seen.setdefault("argv", argv) and (_ for _ in ()).throw(SystemExit(0))), \
              mock.patch.dict(ap.os.environ, {"LOOM_BODY_CONVERSATION": "cv-00000000000f"}), \
-             mock.patch.object(ap.sys, "argv", ["approvals", "request", "--kind", "relay", "--target", "mark"]):
+             mock.patch.object(ap, "fetch_statement", return_value="stmt.mac"), \
+             mock.patch.object(ap.sys, "argv", ["approvals", "request", "--kind", "relay", "--target", "mark", "--principal", "typed"]):
             with self.assertRaises(SystemExit):
                 ap.main()
-        self.assertEqual(seen["argv"][-2:], ["--conversation", "cv-00000000000f"])
+        # Its conversation, then the runtime's statement for it, last (a typed one gives way to it).
+        self.assertEqual(seen["argv"][-4:], ["--conversation", "cv-00000000000f", "--principal", "stmt.mac"])
+        self.assertNotIn("typed", seen["argv"])
 
     def test_the_lint_refuses_ids_hashes_rounds_and_lane_words_saying_why(self):
         bad = {"t-40 needs the OAuth click": "a task id", "Merge acme/app#12?": "a pull request or issue id",
@@ -1055,12 +1062,111 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertFalse(self.grant("dan", "github:onterris/*", "do")["ok"], "refused, not overwritten")
         self.assertIn("bogus", path.read_text())
 
+    def test_a_card_for_several_people_is_theirs_and_no_one_else_s(self):
+        aid = self.ask_merge("loren,dan")
+        self.assertEqual(self.ask_merge("dan,loren"), aid, "the same people, in any order: the same card")
+        self.assertNotEqual(self.ask_merge("eve,mallory"), aid)
+        self.assertNotEqual(self.ask_merge(None), aid, "nobody named isn't Loren and Dan")
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        use = lambda whose: self.api(["use", aid, "--kind", "merge", "--target", self.ON_POND], whose)["exit"]
+        self.assertEqual([use("eve,mallory"), use(None), use("loren")], [1, 1, 1])
+        self.assertEqual(use("dan,loren"), 0)
+        many = ap.get(self.ask_merge("a,b,c,d,e", f"github:onterris/on-pond#230@{SHA}"))
+        self.assertEqual(ap.headline(many), "Merge on-pond#230 for A, B and 3 others?")
+
+    def test_a_person_named_owner_is_not_the_owner(self):
+        self.assertEqual(self.rule("@owner"), "ask")
+        self.assertEqual(ap.principal_of(HOUSE_WHO, "S:ada:@owner")["for"], ap.UNKNOWN)
+        self.assertFalse(self.grant("owner", "github:onterris/*", "do")["ok"])
+        with self.assertRaises(ValueError):
+            ap.grant("merge", self.ON_POND, "ada", None, person="owner-x Y")
+
     def test_the_statement_is_taken_off_the_argv_and_never_kept(self):
         self.assertEqual(ap.take_principal(["rule", "--principal", "a", "merge", "--principal", "b"]), (["rule", "merge"], "b"))
+        self.assertEqual(ap.take_principal(["rule", "--principal", "a", "--principal=c"]), (["rule"], "c"))
+        self.assertEqual(ap.take_principal(["rule", "--principal", "FORGED", "--principal", ""]), (["rule"], None), "the last, even empty")
         aid = self.ask_merge("loren")
         for f in Path(self.td.name).iterdir():
             self.assertNotIn("S:ada:loren", f.read_text(), f.name)
         self.assertEqual(ap.get(aid)["for"], "loren")
+
+
+class TheRuntime(unittest.TestCase):
+    """verify_statement and fetch_statement against a stand-in runtime command (APPROVALS_PRINCIPAL): what it's handed,
+    and that anything but a clean yes is no statement."""
+
+    FAKE = """#!/usr/bin/env python3
+import json, os, sys
+stdin = sys.stdin.read() if "--verify" in sys.argv else ""
+with open(os.environ["RT_RECORD"], "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "stdin": stdin}) + "\\n")
+sys.stdout.write(os.environ.get("RT_ANSWER", ""))
+sys.exit(int(os.environ.get("RT_EXIT", "0")))
+"""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        d = Path(self.td.name)
+        (d / "rt").write_text(self.FAKE)
+        (d / "rt").chmod(0o755)
+        self.record = d / "record.jsonl"
+        self.env = mock.patch.dict(os.environ, {"APPROVALS_PRINCIPAL": str(d / "rt"), "RT_RECORD": str(self.record)})
+        self.env.start()
+        # The real one, not the tests' stand-in.
+        self.real = mock.patch.object(ap, "verify_statement", REAL_VERIFY)
+        self.real.start()
+
+    def tearDown(self):
+        self.real.stop()
+        self.env.stop()
+        self.td.cleanup()
+
+    def calls(self):
+        return [json.loads(l) for l in self.record.read_text().splitlines()] if self.record.exists() else []
+
+    def answer(self, ans, code=0):
+        return mock.patch.dict(os.environ, {"RT_ANSWER": json.dumps(ans) if not isinstance(ans, str) else ans, "RT_EXIT": str(code)})
+
+    def test_verify_hands_the_statement_on_stdin_and_takes_only_a_clean_yes(self):
+        good = {"ok": True, "agent": "ada", "conversation": "cv-0123456789ab", "for": "loren", "owner": False, "people": ["loren"]}
+        with self.answer(good):
+            self.assertEqual(ap.verify_statement("the.statement"), good)
+        self.assertEqual(self.calls()[-1], {"argv": ["--verify"], "stdin": "the.statement"})
+        with self.answer(good, 1):
+            self.assertIsNone(ap.verify_statement("x"), "a non-zero exit is no, whatever it printed")
+        with self.answer({**good, "ok": False}):
+            self.assertIsNone(ap.verify_statement("x"))
+        with self.answer({**good, "ok": "yes"}):
+            self.assertIsNone(ap.verify_statement("x"), "ok is true, not truthy")
+        with self.answer("not json"):
+            self.assertIsNone(ap.verify_statement("x"))
+        with mock.patch.dict(os.environ, {"APPROVALS_PRINCIPAL": "/nonexistent/rt"}):
+            self.assertIsNone(ap.verify_statement("x"), "a command that won't run")
+        with mock.patch.object(ap.subprocess, "run", side_effect=ap.subprocess.TimeoutExpired("rt", 10)):
+            self.assertIsNone(ap.verify_statement("x"))
+        # And end to end: the owner's statement for this agent reads his rules; for another agent it doesn't.
+        with self.answer({**good, "for": "jonathan", "owner": True}):
+            self.assertEqual(ap.principal_of({"agent": "ada"}, "s")["for"], ap.OWNER)
+            self.assertEqual(ap.principal_of({"agent": "bo"}, "s")["for"], ap.UNKNOWN)
+
+    def test_a_body_fetches_its_own_statement_from_the_runtime(self):
+        # On loom's machine (a local body): the setting's command.
+        here = mock.patch.object(ap, "in_a_house", return_value=False)
+        here.start()
+        self.addCleanup(here.stop)
+        with self.answer({"ok": True, "statement": "eyJ2IjoxfQ.c2ln"}):
+            self.assertEqual(ap.fetch_statement("cv-0123456789ab"), "eyJ2IjoxfQ.c2ln")
+        self.assertEqual(self.calls()[-1]["argv"], ["--conversation", "cv-0123456789ab"])
+        for bad in ({"ok": False, "statement": "a.b"}, {"ok": True, "statement": ""}, {"ok": True, "statement": "a b"}, "nope"):
+            with self.answer(bad):
+                self.assertIsNone(ap.fetch_statement("cv-0123456789ab"), bad)
+        # In a house: the house's own loom-runtime, never the machine's setting.
+        seen = []
+        here.stop()
+        with mock.patch.object(ap, "in_a_house", return_value=True), \
+             mock.patch.object(ap.subprocess, "run", side_effect=lambda argv, **k: seen.append(argv) or ap.subprocess.CompletedProcess(argv, 1, "", "")):
+            ap.fetch_statement("cv-0123456789ab")
+        self.assertEqual(seen[0][:2], ["loom-runtime", "principal"])
 
 
 class LoomPageRules(unittest.TestCase):

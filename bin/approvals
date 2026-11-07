@@ -333,7 +333,8 @@ def principal_of(who, statement=None, local=False):
         if v.get("owner") is True:
             return {"for": OWNER, "people": []}
         f = v.get("for")
-        return {"for": f if isinstance(f, str) and PERSON.fullmatch(f) else UNKNOWN, "people": people}
+        # A person whose slug is "owner" is a person, not the owner: unknown here, since the words are the same.
+        return {"for": f if isinstance(f, str) and PERSON.fullmatch(f) and f != OWNER else UNKNOWN, "people": people}
     if local and not LOCAL_BODY:
         return {"for": OWNER if setting("APPROVALS_LOCAL_PRINCIPAL", OWNER) == OWNER else UNKNOWN, "people": []}
     return {"for": UNKNOWN, "people": []}
@@ -345,8 +346,9 @@ LOCAL_BODY = False
 
 
 def fetch_statement(conversation):
-    """This body's statement from the runtime (`loom runtime principal --conversation cv`), or None."""
-    cmd = setting("APPROVALS_PRINCIPAL", "loom runtime principal")
+    """This body's statement from the runtime (`loom runtime principal --conversation cv`), or None. In a house that's
+    the house's own `loom-runtime` (loom-box installs it there): APPROVALS_PRINCIPAL is a setting of loom's machine."""
+    cmd = "loom-runtime principal" if in_a_house() else setting("APPROVALS_PRINCIPAL", "loom runtime principal")
     try:
         out = subprocess.run([*shlex.split(cmd), "--conversation", conversation], capture_output=True, text=True,
                              timeout=30, stdin=subprocess.DEVNULL)
@@ -354,13 +356,23 @@ def fetch_statement(conversation):
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     st = r.get("statement") if isinstance(r, dict) and r.get("ok") is True else None
-    return st if isinstance(st, str) and re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", st) else None
+    # Opaque: the runtime's to read (--verify). One word, of a size a command line carries.
+    return st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None
 
 
 def for_of(a):
     """An approval's principal; one from before principals was asked as the owner's (they lasted 8 hours at most)."""
     f = a.get("for", OWNER)
     return f if f in (OWNER, UNKNOWN) or PERSON.fullmatch(str(f)) else UNKNOWN
+
+
+def same_principal(a, p):
+    """Whether approval `a` was asked for principal `p`: the same owner, person, or (someone loom can't name) the same
+    people it named, so a card that read "for Loren and Dan" is never spent for Eve."""
+    f = for_of(a)
+    if f != p["for"]:
+        return False
+    return f != UNKNOWN or sorted(a.get("people") or []) == sorted(p.get("people") or [])
 
 
 def person_name(slug):
@@ -374,8 +386,10 @@ def for_words(a):
     if f == OWNER:
         return None
     if f != UNKNOWN:
-        return person_name(f)
-    people = [person_name(p) for p in a.get("people") or []]
+        return person_name(f)[:40]
+    people = [person_name(p)[:40] for p in a.get("people") or []]
+    if len(people) > 3:
+        return f"{', '.join(people[:2])} and {len(people) - 2} others"
     if len(people) > 1:
         return ", ".join(people[:-1]) + " and " + people[-1]
     return "someone loom can't name"
@@ -451,7 +465,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
-            if a["kind"] == kind and a["target"] == target and may_spend(a["who"], who) and for_of(a) == p["for"] \
+            if a["kind"] == kind and a["target"] == target and may_spend(a["who"], who) and same_principal(a, p) \
                     and state_of(a) in ("pending", "allowed"):
                 # A caller that now says it plainly: a pending card takes the plain words (the owner hasn't read it yet).
                 # Only the body the card names, so the words the owner reads are the ones its "from" says.
@@ -464,7 +478,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
                 return a
         # The owner answered this exact target already (approvals grant): that's the answer, newest first.
         granted = sorted((a for a in s.d["approvals"].values() if a.get("granted") and a["kind"] == kind
-                          and a["target"] == target and a["who"].get("agent") == who["agent"] and for_of(a) == p["for"]
+                          and a["target"] == target and a["who"].get("agent") == who["agent"] and same_principal(a, p)
                           and state_of(a) in ("allowed", "denied")), key=lambda a: a["at"], reverse=True)
         if granted:
             return {**granted[0], "state": state_of(granted[0])}
@@ -500,8 +514,10 @@ def spend_card(caller, aid):
             "expires": a.get("expires") if a["state"] == "allowed" else None}
 
 
-def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=None):
-    """Spend an allowed approval for exactly the action it allowed, for the one it was asked for. True once."""
+def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=None, unstated=False):
+    """Spend an allowed approval for exactly the action it allowed, for the one it was asked for. True once.
+    `unstated`: a piece on loom's machine spending for a body (--as) without saying on whose behalf (--on-behalf): the
+    runtime's relay, which has no conversation to ask about. Everything else is checked; whom it was for isn't."""
     if kind in PIECE_KINDS and not acting_for:
         # Spent by the piece that runs it (the clock sets the wake), never by a body: a body's own `use` would
         # spend the owner's yes and run nothing.
@@ -526,7 +542,7 @@ def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=N
             raise PermissionError(f"{aid} allows {a['kind']} for {a['target']}, not {kind} for {target}")
         # For the one it was asked for, and nobody else (t-1943): the owner's yes for Loren isn't a yes for Dan, or for
         # the owner's own work, and his yes for himself isn't one for Loren.
-        if for_of(a) != p["for"]:
+        if not unstated and not same_principal(a, p):
             s.log("refused-use", a, for_used=p["for"])
             raise PermissionError(f"{aid} was asked for {for_words(a) or 'the owner'}; this body acts for {principal_words(p)}")
         last = newest_decision(s.d["approvals"].values(), kind, target, a["who"].get("agent"))
@@ -665,6 +681,8 @@ def make_grant(person, kind, scope, tier, by):
     person = str(person or "").strip().lower()
     if not PERSON.fullmatch(person) or len(person) > 80:
         raise ValueError("a grant names a person by their slug, like loren or loren-smith")
+    if person == OWNER:
+        raise ValueError("owner is the word for your own work (your rules above), not a person to grant")
     return {"person": person, **make_rule(kind, scope, tier, by)}
 
 
@@ -787,7 +805,7 @@ def needs_cards(rules):
 UNKNOWN_NOTE = "this body acts for someone loom can't name (no word from the runtime, or several people), so it asks"
 
 
-def rules_for(agent, kind, targets, principal=OWNER):
+def rules_for(agent, kind, targets, principal=OWNER, people=()):
     """Each target's tier and, for ask, the newest merge approval for it, this agent and this principal:
     {target: {tier, approval?}}. The standing rules are the owner's own work's (t-1943); for anyone else, the grants the
     owner set for that person; for someone loom can't name, ask."""
@@ -798,12 +816,13 @@ def rules_for(agent, kind, targets, principal=OWNER):
         if principal != OWNER:
             rules = [g for g in s.grants() if g["person"] == principal]
         rows = [a for a in s.d["approvals"].values() if a["kind"] == kind and a["who"].get("agent") == agent
-                and for_of(a) == principal]
+                and same_principal(a, {"for": principal, "people": people})]
     cards = projects() if needs_cards(rules) else []
     out = {}
     for t in targets:
         if principal == UNKNOWN:
-            repo_of(t) or resolve([], kind, t)    # still refuses what isn't a target
+            if not repo_of(t):
+                raise ValueError("a merge target is <forge>:<locator>#<n>@<40-hex head>, like github:acme/app#12@…")
             tier, rule, note = "ask", None, UNKNOWN_NOTE
         else:
             tier, rule, note = resolve(rules, kind, t, cards)
@@ -822,7 +841,7 @@ def rule_answer(caller, kind, targets, agent=None, as_json=False, statement=None
         raise ValueError("rule merge TARGET [TARGET…], 200 at most")
     who = {"agent": agent} if agent else who_of(caller)
     p = {"for": OWNER} if agent else principal_for_call(caller, who, statement)
-    res = rules_for(who["agent"], kind, targets, p["for"])
+    res = rules_for(who["agent"], kind, targets, p["for"], p.get("people") or ())
     if as_json:
         return json.dumps(res) + "\n", ""
     out = []
@@ -886,7 +905,8 @@ def grant(kind, target, agent, by, deny=False, person=OWNER):
     """The owner's answer from loom's machine (the Changes piece's Yes and Not yet): answers the agent's pending
     request for TARGET, or makes the answer for one it hasn't made yet. For the owner's own work unless --person names
     whom it's for (t-1943): a yes for himself is never one for someone else."""
-    if person != OWNER and not PERSON.fullmatch(person or ""):
+    person = OWNER if person == OWNER else str(person or "").strip().lower()
+    if person != OWNER and not (PERSON.fullmatch(person) and len(person) <= 80):
         raise ValueError("--person is the slug of whom it's for")
     if kind != "merge" or not repo_of(target):
         raise ValueError("grant is for a merge approval: --kind merge --target <forge>:<locator>#<n>@<head>")
@@ -925,7 +945,7 @@ def tell(caller, kind, target, what, statement=None):
     what = plain(what, WORDS_MAX)
     if not what:
         raise ValueError("--what says what was merged, for the owner")
-    r = rules_for(who["agent"], kind, [target], p["for"])[target]
+    r = rules_for(who["agent"], kind, [target], p["for"], p.get("people") or ())[target]
     tier, note = r["tier"], r.get("note")
     if tier == "ask":
         raise PermissionError(f"{note}: request a merge approval instead" if note else
@@ -1172,7 +1192,7 @@ def ui_page(req):
     owner = is_owner(req)
     if owner:
         with Store() as s:
-            proj_rules = any(r["scope"].startswith("project:") for r in s.rules())
+            proj_rules = any(r["scope"].startswith("project:") for r in [*s.rules(), *s.grants()])
     cards = projects() if owner and (proj_rules or any(a["kind"] == "merge" for a in pending)) else None
     sections = []
     if pending:
@@ -1393,9 +1413,12 @@ def take_principal(argv):
         if argv[i] == "--principal" and i + 1 < len(argv):
             st, i = argv[i + 1], i + 2
             continue
+        if argv[i].startswith("--principal="):
+            st, i = argv[i].split("=", 1)[1], i + 1
+            continue
         out.append(argv[i])
         i += 1
-    return out, st
+    return out, (st or None)
 
 
 def run(argv, caller=None):
@@ -1465,7 +1488,8 @@ def run(argv, caller=None):
         return get(a.id)["state"] + "\n"
     if a.cmd == "use":
         # Over the API (a body) only with no wake kind; on loom's machine (the clock, with or without --as) any.
-        use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller, statement=statement, on_behalf=a.on_behalf or None)
+        use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller, statement=statement, on_behalf=a.on_behalf or None,
+            unstated=bool(a.as_) and not a.on_behalf)
         return f"{a.id}: used\n"
     if a.cmd == "rule":
         return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement)

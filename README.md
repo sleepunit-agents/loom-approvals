@@ -70,9 +70,13 @@ for that person, or it asks.
   loom's runtime signs a statement of who the body's conversation acts for
   (loom-box `loom runtime principal`), a house's `piece-call` adds it as
   `--principal <statement>`, and the piece checks it with
-  `loom runtime principal --verify` (APPROVALS_PRINCIPAL). No statement, one
-  that doesn't verify, or one for another agent: someone loom can't name,
-  **never the owner**. A body the runtime runs on loom's machine (a local wake)
+  `loom runtime principal --verify` (APPROVALS_PRINCIPAL), taking only an
+  answer with `ok: true` and exit 0. No statement, one that doesn't verify, or
+  one for another agent: someone loom can't name, **never the owner**. A
+  statement lasts 5 minutes and the runtime refuses one whose conversation has
+  heard someone new since; within that, it's a bearer's for that agent (the
+  runtime's README states the limit: one agent's bodies share a house). A
+  person whose slug is `owner` is that person, never the owner: unknown here. A body the runtime runs on loom's machine (a local wake)
   fetches its own; any other call on loom's machine is the owner's
   (APPROVALS_LOCAL_PRINCIPAL, `owner` or `unknown`).
 - **`rule merge`** reads the standing rules only for the owner's own work. For
@@ -82,6 +86,9 @@ for that person, or it asks.
 - **A card names whom it's for**, in the piece's words, first: "Merge
   on-pond#220 for Loren?", or "For Loren: <the ask>" for any other kind. The
   body's own question follows in the sheet.
+- **Several people** ("Merge on-pond#221 for Loren and Dan?") are someone loom
+  can't name, so no grant applies; the card is theirs, and it's spent only for
+  exactly those people.
 - **Spent only for them.** An approval asked for Loren is spent only by a body
   acting for Loren (and the agent, the exact target, once, before it expires,
   as before). Asking again is the same card only for the same person. The
@@ -94,7 +101,11 @@ for that person, or it asks.
   piece API sets one. The Changes piece's `grant` is the owner's own work
   unless it says `--person`.
 - **The clock** files and spends a wake approval for a body with `--as` and
-  `--on-behalf <whom the wake is for>`; only a local `--as` call may say that.
+  `--on-behalf <whom the wake is for>`; only a local `--as` call may say that,
+  and it's held to it. **The runtime's relay** spends a relay approval with
+  `--as` and no `--on-behalf` (it has no conversation to ask about): then
+  everything is checked but whom it was for. A relay carries none of the
+  owner's authority to the agent it reaches.
 
 ## Standing rules
 

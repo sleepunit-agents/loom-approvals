@@ -52,7 +52,8 @@
       {
         "name": "APPROVALS_LOCAL_PRINCIPAL",
         "label": "Who a call on loom's machine acts for",
-        "hint": "owner (the default) or unknown; a body in a conversation is always its conversation's"
+        "hint": "owner (the default) or unknown; a body in a conversation is always its conversation's",
+        "default": "owner"
       },
       {
         "name": "APPROVALS_PROJECTS",
