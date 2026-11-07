@@ -31,6 +31,30 @@ exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), ap.__dict__)
 HOUSE = {"kind": "agent", "agent": "ada", "house": "h-7"}
 
 
+def fake_verify(statement):
+    """The runtime's --verify, for tests: "S:<agent>:<for>" verifies; for is owner, a slug, ? (unknown) or a,b (several)."""
+    parts = str(statement).split(":")
+    if len(parts) != 3 or parts[0] != "S":
+        return None
+    agent, f = parts[1], parts[2]
+    if f == "owner":
+        return {"ok": True, "agent": agent, "for": "jonathan", "owner": True, "people": []}
+    if f == "?":
+        return {"ok": True, "agent": agent, "for": None, "owner": False, "people": []}
+    people = f.split(",")
+    return {"ok": True, "agent": agent, "for": people[0] if len(people) == 1 else None, "owner": False, "people": people}
+
+
+# Every test runs with the fake runtime; a call that's the owner's own work says so, as a house's piece-call would.
+ap.verify_statement = fake_verify
+AS_OWNER = ["--principal", "S:ada:owner"]
+
+
+def owned(argv):
+    """argv as the owner's own work, unless it already says whose (or is a bare verb with nothing to say it for)."""
+    return argv if "--principal" in argv or not argv else [*argv, *AS_OWNER]
+
+
 class Approvals(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -42,7 +66,7 @@ class Approvals(unittest.TestCase):
         self.td.cleanup()
 
     def api(self, argv, caller=HOUSE):
-        return ap.api_answer({"caller": caller, "path": "run", "body": {"argv": argv}})
+        return ap.api_answer({"caller": caller, "path": "run", "body": {"argv": owned(argv)}})
 
     def ask(self, target="acme/app:octocat", caller=HOUSE):
         r = self.api(["request", "--kind", "github-write", "--target", target, "--what", "push the fix to acme/app <b>",
@@ -152,7 +176,7 @@ class Approvals(unittest.TestCase):
         r = self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})
         self.assertEqual(r["body"]["exit"], 0, r)
         got = json.loads(r["body"]["stdout"])
-        self.assertEqual(got, {"id": aid, "agent": "ada", "state": "pending", "kind": "github-write", "target": "acme/app:octocat", "expires": None})
+        self.assertEqual(got, {"id": aid, "agent": "ada", "for": "owner", "state": "pending", "kind": "github-write", "target": "acme/app:octocat", "expires": None})
         ap.ui_act({"action": "allow", "fields": {"id": aid}})
         got = json.loads(self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})["body"]["stdout"])
         self.assertEqual(got["state"], "allowed")
@@ -229,7 +253,10 @@ class Approvals(unittest.TestCase):
         # Over the API, --as is refused: a body can't claim to be another.
         self.assertEqual(self.api(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)],
                                   {"kind": "agent", "agent": "ada", "house": "h-9"})["body"]["exit"], 1)
-        self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)]), f"{aid}: used\n")
+        # Spent for whom it was asked: the piece says so (--on-behalf); without it, someone loom can't name, so no.
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)])
+        self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "owner"]), f"{aid}: used\n")
 
     def test_a_piece_may_file_a_request_for_the_body_it_acts_for_locally(self):
         out = ap.run(["request", "--kind", "local-wake", "--target", "ada:abc", "--what", "run X", "--why", "y", "--as", json.dumps(HOUSE)])
@@ -418,7 +445,7 @@ class Rules(unittest.TestCase):
         self.td.cleanup()
 
     def api(self, argv, caller=HOUSE):
-        return ap.api_answer({"caller": caller, "path": "run", "body": {"argv": argv}})["body"]
+        return ap.api_answer({"caller": caller, "path": "run", "body": {"argv": owned(argv)}})["body"]
 
     def rules(self, *rows):
         with ap.Store() as s:
@@ -558,7 +585,7 @@ class Rules(unittest.TestCase):
         t2 = f"github:else/app#2@{SHA}"
         ap.run(["grant", "--kind", "merge", "--target", t2, "--for", "ada", "--by", "jo"])
         d = json.loads(ap.run(["rule", "merge", T, t2, "--for", "ada", "--json"])[0])
-        self.assertEqual(d[T], {"tier": "do", "scope": "github:acme/*"})
+        self.assertEqual(d[T], {"tier": "do", "for": "owner", "scope": "github:acme/*"})
         self.assertEqual((d[t2]["tier"], d[t2]["approval"]["state"]), ("ask", "allowed"))
         self.assertEqual(self.api(["rule", "merge", T, "--for", "ada"])["exit"], 1)
 
@@ -689,7 +716,7 @@ class PlainAsks(unittest.TestCase):
         self.td.cleanup()
 
     def api(self, argv):
-        return ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": argv}})["body"]
+        return ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned(argv)}})["body"]
 
     GOOD = ["--ask", "A change to Art's sync script landed. OK to start updating lane prompts on loom again?",
             "--why", "The script that copies lane prompts to loom changed, so it stopped until you look.",
@@ -811,6 +838,231 @@ class PlainAsks(unittest.TestCase):
 
 
 
+class OnWhoseBehalf(unittest.TestCase):
+    """t-1943, the owner's ruling (2026-11-07): his standing rules and his yes cover work done for him. A body acting
+    for anyone else gets the grants he set for that person, or asks; the card names whom it's for; an approval asked
+    for one person is spent only for them. Who that is, is the runtime's signed word (--principal), never the body's."""
+
+    ON_POND = f"github:onterris/on-pond#220@{SHA}"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.patches = [mock.patch.object(ap, "STATE", Path(self.td.name)), mock.patch.object(ap, "projects", lambda: CARDS)]
+        for p in self.patches:
+            p.start()
+        # The owner's own rule for all of onterris: just do it, for him.
+        with ap.Store() as s:
+            s.rules()
+            s.replace_rules([ap.make_rule("merge", "github:onterris/*", "do", "test")])
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.td.cleanup()
+
+    def api(self, argv, whose=None, caller=HOUSE):
+        """A body's call over the API, with the runtime's statement for `whose` (owner, a slug, ?, a,b), or none."""
+        return ap.api_answer({"caller": caller, "path": "run", "body": {"argv": argv + (["--principal", f"S:{caller['agent']}:{whose}"] if whose else [])}})["body"]
+
+    def rule(self, whose, target=None):
+        return self.api(["rule", "merge", target or self.ON_POND], whose)["stdout"].strip()
+
+    def grant(self, person, scope, tier, caller=OWNER):
+        return ap.ui_act({"action": "grant-add", "caller": caller, "fields": {"person": person, "scope": scope, "tier": tier}})
+
+    def ask_merge(self, whose, target=None):
+        r = self.api(["request", "--kind", "merge", "--target", target or self.ON_POND, "--ask", "OK to merge the alarm fix for the pond page?",
+                      "--why", "Its checks are green.", "--if-yes", "I merge it.", "--if-no", "It waits."], whose)
+        self.assertEqual(r["exit"], 0, r)
+        return r["stdout"].split(":")[0]
+
+    def test_the_owner_s_rules_are_for_his_own_work_only(self):
+        self.assertEqual(self.rule("owner"), "do")
+        self.assertEqual(self.rule("loren"), "ask", "his rule for onterris doesn't carry to work for Loren")
+        self.assertEqual(self.rule(None), "ask", "no word from the runtime: someone loom can't name")
+        self.assertEqual(self.rule("?"), "ask")
+        self.assertEqual(self.rule("loren,dan"), "ask", "several people")
+        # A statement for another agent says nothing about this one.
+        self.assertEqual(self.api(["rule", "merge", self.ON_POND, "--principal", "S:bo:owner"])["stdout"], "ask\n")
+        # A statement the runtime doesn't vouch for is no statement.
+        self.assertEqual(self.api(["rule", "merge", self.ON_POND, "--principal", "forged"])["stdout"], "ask\n")
+        r = self.api(["rule", "merge", self.ON_POND])
+        self.assertIn("someone loom can't name", r["stderr"])
+        self.assertEqual(json.loads(self.api(["rule", "merge", self.ON_POND, "--json"], "loren")["stdout"])[self.ON_POND]["for"], "loren")
+
+    def test_a_grant_the_owner_set_for_a_person_answers_for_them_and_no_one_else(self):
+        self.assertTrue(self.grant("loren", "github:onterris/on-pond", "do")["ok"])
+        self.assertEqual(self.rule("loren"), "do")
+        self.assertEqual(self.rule("dan"), "ask", "Loren's grant isn't Dan's")
+        self.assertEqual(self.rule(None), "ask")
+        self.assertEqual(self.rule("loren", f"github:onterris/other#1@{SHA}"), "ask", "only the scope granted")
+        # Most specific wins, as for rules; a tie goes to the stricter.
+        self.assertTrue(self.grant("loren", "github:onterris/*", "tell")["ok"])
+        self.assertEqual(self.rule("loren"), "do")
+        self.assertEqual(self.rule("loren", f"github:onterris/other#1@{SHA}"), "tell")
+        self.assertTrue(self.grant("loren", "project:pond", "ask")["ok"])
+        self.assertEqual(self.rule("loren", f"github:acme/pond#1@{SHA}"), "ask")
+        # tier none removes it.
+        self.assertTrue(ap.ui_act({"action": "grant", "caller": OWNER, "fields": {"person": "loren", "scope": "github:onterris/on-pond", "kind": "merge", "tier": "none"}})["ok"])
+        self.assertEqual(self.rule("loren"), "tell")
+        # The owner's own rules are untouched by any of it.
+        self.assertEqual(self.rule("owner"), "do")
+
+    def test_only_the_owner_sets_a_grant_and_only_on_the_page(self):
+        member = {"kind": "owner", "who": "sam", "agents": ["ada"]}
+        for c in (member, {"kind": "agent", "agent": "ada"}, None):
+            self.assertFalse(self.grant("loren", "github:onterris/*", "do", caller=c)["ok"], c)
+        self.assertEqual(self.rule("loren"), "ask")
+        # Over the API there's no verb for it, whoever the body says it acts for.
+        for argv in (["grant-add", "loren"], ["grants"], ["grant", "--kind", "merge", "--target", self.ON_POND, "--for", "ada", "--person", "loren"]):
+            self.assertEqual(self.api(argv, "owner")["exit"], 1, argv)
+        self.assertEqual(self.rule("loren"), "ask")
+        self.assertFalse(self.grant("Not A Slug", "github:onterris/*", "do")["ok"])
+        self.assertFalse(self.grant("loren", "nonsense", "do")["ok"])
+        self.assertTrue(self.grant("loren", "github:onterris/*", "do")["ok"])
+        # On the page, beside his own rules, in words; a member who owns some agents doesn't see either.
+        rules = next(x for x in ap.ui_page({"path": "", "caller": OWNER})["sections"] if x["id"] == "rules")
+        panels = {b["title"]: b for b in rules["blocks"]}
+        self.assertEqual(list(panels), ["Merging, for you", "Merging, for other people"])
+        row = panels["Merging, for other people"]["rows"][0]
+        self.assertEqual((row["label"], row["value"]), ("Loren: Everything in onterris", "Just do it"))
+        self.assertEqual(row["choice"]["fields"], {"person": "loren", "scope": "github:onterris/*", "kind": "merge"})
+        self.assertEqual(panels["Merging, for other people"]["rows"][-1]["edit"]["action"], "grant-add")
+        self.assertNotIn("rules", [x["id"] for x in ap.ui_page({"path": "", "caller": member})["sections"]])
+
+    def test_the_card_says_whom_it_is_for_in_the_piece_s_words(self):
+        aid = self.ask_merge("loren")
+        a = ap.get(aid)
+        self.assertEqual((a["for"], ap.headline(a)), ("loren", "Merge on-pond#220 for Loren?"))
+        ask = next(x for x in ap.ui_manifest()["asks"] if x["actions"][0]["fields"]["id"] == aid)
+        self.assertEqual((ask["text"], ask["for"]), ("Merge on-pond#220 for Loren?", "loren"))
+        self.assertIn("OK to merge the alarm fix for the pond page?", ask["details"], "the body's own question is still there")
+        self.assertIn("It's for Loren, not for you: it's spent only for Loren.", ask["fine"])
+        sheet = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]
+        self.assertEqual([b["text"] for b in sheet["blocks"][:2]], ["Merge on-pond#220 for Loren?", "OK to merge the alarm fix for the pond page?"])
+        # Any other kind leads with whom; someone loom can't name, and several people, say so.
+        r = self.api(["request", "--kind", "github-write", "--target", "onterris/on-pond:jbarket", "--ask", "OK to push the alarm fix?",
+                      "--why", "It's ready.", "--if-yes", "I push it.", "--if-no", "It waits."])
+        self.assertEqual(ap.headline(ap.get(r["stdout"].split(":")[0])), "For someone loom can't name: OK to push the alarm fix?")
+        several = self.ask_merge("loren,dan", f"github:onterris/on-pond#221@{SHA}")
+        self.assertEqual(ap.headline(ap.get(several)), "Merge on-pond#221 for Loren and Dan?")
+        # The owner's own: the body's ask, as before.
+        self.assertEqual(ap.headline(ap.get(self.ask_merge("owner", f"github:onterris/on-pond#222@{SHA}"))), "OK to merge the alarm fix for the pond page?")
+        # The record says it too.
+        rec = next(x for x in ap.ui_page({"path": "", "caller": OWNER})["sections"] if x["id"] == "record")
+        self.assertIn(f"{aid}  pending  merge", rec["blocks"][0]["rows"][0]["sheet"]["blocks"][0]["text"])
+        self.assertIn("for loren", rec["blocks"][0]["rows"][0]["sheet"]["blocks"][0]["text"])
+
+    def test_asked_for_one_person_it_is_spent_only_for_them(self):
+        aid = self.ask_merge("loren")
+        self.assertEqual(self.ask_merge("loren"), aid, "asking again for the same person is the same card")
+        mine = self.ask_merge("owner")
+        self.assertNotEqual(mine, aid, "for the owner it's another card")
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        use = lambda whose: self.api(["use", aid, "--kind", "merge", "--target", self.ON_POND], whose)
+        for whose in ("owner", "dan", None, "loren,dan"):
+            r = use(whose)
+            self.assertEqual(r["exit"], 1, whose)
+            self.assertIn("was asked for Loren", r["stderr"])
+        self.assertEqual(ap.get(aid)["state"], "allowed", "a refused spend leaves it allowed")
+        self.assertEqual(use("loren")["exit"], 0)
+        self.assertEqual(use("loren")["exit"], 1, "once")
+        # check --json says whom it's for, so a continuation spends it as that.
+        self.assertEqual(json.loads(self.api(["check", aid, "--json"], "loren")["stdout"])["for"], "loren")
+
+    def test_the_owner_s_yes_for_himself_is_not_a_yes_for_someone_else(self):
+        mine = self.ask_merge("owner", f"github:acme/app#5@{SHA}")
+        ap.ui_act({"action": "allow", "fields": {"id": mine}})
+        r = self.api(["request", "--kind", "merge", "--target", f"github:acme/app#5@{SHA}", "--ask", "OK to merge the fix?",
+                      "--why", "Green.", "--if-yes", "I merge it.", "--if-no", "It waits."], "loren")
+        self.assertIn("asked the owner", r["stdout"], "a new card for Loren, not his allowed one")
+        self.assertEqual(self.api(["use", mine, "--kind", "merge", "--target", f"github:acme/app#5@{SHA}"], "loren")["exit"], 1)
+        # The Changes piece's Yes is his own, unless it names whom it's for.
+        t = f"github:acme/app#6@{SHA}"
+        g = ap.run(["grant", "--kind", "merge", "--target", t, "--for", "ada", "--by", "jonathan-barket"]).split(":")[0]
+        self.assertEqual(self.rule("loren", t), "ask")
+        self.assertEqual(self.api(["use", g, "--kind", "merge", "--target", t], "loren")["exit"], 1)
+        g2 = ap.run(["grant", "--kind", "merge", "--target", t, "--for", "ada", "--person", "loren"]).split(":")[0]
+        self.assertEqual(self.rule("loren", t), f"ask allowed {g2}")
+        self.assertEqual(self.api(["use", g2, "--kind", "merge", "--target", t], "loren")["exit"], 0)
+
+    def test_a_deny_wins_whoever_it_was_for(self):
+        mine = self.ask_merge("owner", f"github:acme/app#7@{SHA}")
+        ap.ui_act({"action": "allow", "fields": {"id": mine}})
+        theirs = self.ask_merge("loren", f"github:acme/app#7@{SHA}")
+        ap.ui_act({"action": "deny", "fields": {"id": theirs}})
+        self.assertEqual(ap.get(mine)["state"], "denied", "a no to this exact change stops every yes for it")
+
+    def test_t_1929_still_holds_with_a_principal(self):
+        aid = self.ask_merge("loren")
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        # Another agent never spends it, even for Loren.
+        bo = {"kind": "agent", "agent": "bo", "house": "h-3"}
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", self.ON_POND], "loren", caller=bo)["exit"], 1)
+        # A service's house spends only what its own service asked for.
+        svc = {**HOUSE, "house": "h-8", "service": "discord-bodies"}
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", self.ON_POND], "loren", caller=svc)["exit"], 1)
+        # The exact target only.
+        self.assertEqual(self.api(["use", aid, "--kind", "merge", "--target", f"github:onterris/on-pond#220@{SHA2}"], "loren")["exit"], 1)
+        # Expiry.
+        with ap.Store() as s:
+            s.d["approvals"][aid]["expires"] = "2000-01-01T00:00:00Z"
+            s.save()
+        self.assertIn("expired", self.api(["use", aid, "--kind", "merge", "--target", self.ON_POND], "loren")["stderr"])
+
+    def test_always_on_a_card_for_someone_else_is_a_grant_for_them(self):
+        aid = self.ask_merge("loren")
+        a = ap.get(aid)
+        self.assertEqual(ap.always_scope(a, CARDS), ("github:onterris/on-pond", "Always for Loren on onterris/on-pond"))
+        r = ap.ui_act({"action": "always", "caller": OWNER, "fields": {"id": aid}})
+        self.assertTrue(r["ok"], r)
+        self.assertIn("for Loren", r["message"])
+        self.assertEqual(self.rule("loren", f"github:onterris/on-pond#300@{SHA}"), "do")
+        self.assertEqual(self.rule("dan", f"github:onterris/on-pond#300@{SHA}"), "ask")
+        with ap.Store() as s:
+            self.assertEqual([r["scope"] for r in s.rules()], ["github:onterris/*"], "his own rules didn't change")
+        # Nobody to grant it to: no Always.
+        unk = self.ask_merge(None, f"github:onterris/on-pond#301@{SHA}")
+        self.assertIsNone(ap.always_scope(ap.get(unk), CARDS))
+        self.assertFalse(ap.ui_act({"action": "always", "caller": OWNER, "fields": {"id": unk}})["ok"])
+
+    def test_tell_is_for_a_do_or_tell_that_applies_to_whom_it_was_for(self):
+        tell = lambda whose: self.api(["tell", "--kind", "merge", "--target", self.ON_POND, "--what", "merged the alarm fix"], whose)
+        self.assertEqual(tell("loren")["exit"], 1)
+        self.assertEqual(tell("owner")["exit"], 0)
+        self.grant("loren", "github:onterris/on-pond", "tell")
+        self.assertEqual(tell("loren")["exit"], 0)
+        self.assertEqual(ap.notices()[0].get("for"), "loren")
+
+    def test_on_loom_s_machine_it_is_the_owner_s_unless_set_otherwise_or_a_body_in_a_conversation(self):
+        self.assertEqual(ap.run(["rule", "merge", self.ON_POND]), ("do\n", ""))
+        with mock.patch.dict(os.environ, {"APPROVALS_LOCAL_PRINCIPAL": "unknown"}):
+            self.assertEqual(ap.run(["rule", "merge", self.ON_POND])[0], "ask\n")
+        with mock.patch.object(ap, "LOCAL_BODY", True):
+            self.assertEqual(ap.run(["rule", "merge", self.ON_POND])[0], "ask\n", "a local body with no statement")
+            self.assertEqual(ap.run(["rule", "merge", self.ON_POND, "--principal", f"S:{ap.LOCAL_AGENT}:owner"])[0], "do\n")
+        # --on-behalf is only a piece's, acting for a body (--as).
+        with self.assertRaises(PermissionError):
+            ap.run(["request", "--kind", "relay", "--target", "a->b", "--what", "w", "--why", "y", "--on-behalf", "owner"])
+
+    def test_a_grants_list_that_can_t_be_read_answers_ask_and_is_never_overwritten(self):
+        self.grant("loren", "github:onterris/*", "do")
+        path = Path(self.td.name) / "rules.json"
+        doc = json.loads(path.read_text())
+        doc["grants"].append({"person": "dan", "kind": "merge", "scope": "github:onterris/*", "tier": "bogus"})
+        path.write_text(json.dumps(doc))
+        self.assertEqual(self.rule("dan"), "ask")
+        self.assertFalse(self.grant("dan", "github:onterris/*", "do")["ok"], "refused, not overwritten")
+        self.assertIn("bogus", path.read_text())
+
+    def test_the_statement_is_taken_off_the_argv_and_never_kept(self):
+        self.assertEqual(ap.take_principal(["rule", "--principal", "a", "merge", "--principal", "b"]), (["rule", "merge"], "b"))
+        aid = self.ask_merge("loren")
+        for f in Path(self.td.name).iterdir():
+            self.assertNotIn("S:ada:loren", f.read_text(), f.name)
+        self.assertEqual(ap.get(aid)["for"], "loren")
+
+
 class LoomPageRules(unittest.TestCase):
     """What loom refuses a whole page for: here, a details block inside a sheet (extensions.md, "Panels")."""
 
@@ -835,7 +1087,7 @@ class LoomPageRules(unittest.TestCase):
                 yield from LoomPageRules.sheets(v)
 
     def test_no_sheet_holds_a_details_block_in_any_state(self):
-        api = lambda argv: ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": argv}})["body"]
+        api = lambda argv: ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned(argv)}})["body"]
         plain = ["--ask", "OK to push the fix to the app now?", "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits."]
         ids = [api(["request", "--kind", "github-write", "--target", f"acme/r{n}:octocat", *(plain if n % 2 else []),
                     "--what", "push it", "--why", "ready"])["stdout"].split(":")[0] for n in range(4)]
@@ -850,8 +1102,8 @@ class LoomPageRules(unittest.TestCase):
                 self.assertNotIn('"type": "details"', json.dumps(sh), caller)
 
     def test_the_small_print_says_kind_target_where_and_how_long(self):
-        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": ["request", "--kind", "github-write", "--target", "acme/app:octocat",
-              "--ask", "OK to push the fix to the app now?", "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits.", "--minutes", "30"]}})
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned(["request", "--kind", "github-write", "--target", "acme/app:octocat",
+              "--ask", "OK to push the fix to the app now?", "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits.", "--minutes", "30"])}})
         self.assertEqual(r["body"]["exit"], 0)
         line = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]["blocks"][-1]["text"]
         self.assertEqual(line, "Exactly what this allows: A GitHub write: acme/app:octocat, from Ada's house, for any of Ada's own bodies. "

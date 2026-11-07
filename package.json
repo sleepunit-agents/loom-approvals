@@ -44,6 +44,17 @@
         "hint": "JSON, like [{\"kind\": \"merge\", \"scope\": \"github:acme/*\", \"tier\": \"do\"}]; written once, when there are no rules yet"
       },
       {
+        "name": "APPROVALS_PRINCIPAL",
+        "label": "How to check on whose behalf a body acts",
+        "hint": "the runtime's command; `--verify` checks a statement",
+        "default": "loom runtime principal"
+      },
+      {
+        "name": "APPROVALS_LOCAL_PRINCIPAL",
+        "label": "Who a call on loom's machine acts for",
+        "hint": "owner (the default) or unknown; a body in a conversation is always its conversation's"
+      },
+      {
         "name": "APPROVALS_PROJECTS",
         "label": "How to list projects",
         "hint": "the command that prints project cards as JSON, for project rules",
