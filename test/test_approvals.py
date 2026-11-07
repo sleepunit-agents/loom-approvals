@@ -1124,6 +1124,20 @@ class OnWhoseBehalf(unittest.TestCase):
             self.assertEqual(ap.run(["rule", "merge", self.ON_POND, "--for", "ada"])[0], "ask\n")
         self.assertEqual(ap.run(["rule", "merge", self.ON_POND, "--for", "ada"])[0], "do\n")
 
+    def test_on_behalf_reads_owner_a_person_or_else_unknown(self):
+        cases = {"owner": ap.OWNER, "loren": "loren", "-": ap.UNKNOWN, "Loren!": ap.UNKNOWN, "?": ap.UNKNOWN, "owner ": ap.UNKNOWN}
+        for said, want in cases.items():
+            self.assertEqual(ap.principal_for_call(HOUSE, HOUSE_WHO, None, acting_for=True, on_behalf=said)["for"], want, said)
+        # And a wake the clock filed for the owner is spent as the owner's, for nobody else.
+        out = ap.run(["request", "--kind", "local-wake", "--target", "ada:abc", "--what", "w", "--why", "y", "--as", json.dumps(HOUSE), "--on-behalf", "owner"])
+        aid = out.split(":")[0]
+        self.assertEqual(ap.get(aid)["for"], ap.OWNER)
+        ap.ui_act({"action": "allow", "fields": {"id": aid}})
+        for said in ("-", "loren"):
+            with self.assertRaises(PermissionError):
+                ap.run(["use", aid, "--kind", "local-wake", "--target", "ada:abc", "--as", json.dumps(HOUSE), "--on-behalf", said])
+        self.assertEqual(ap.run(["use", aid, "--kind", "local-wake", "--target", "ada:abc", "--as", json.dumps(HOUSE), "--on-behalf", "owner"]), f"{aid}: used\n")
+
     def test_grant_person_owner_is_refused_and_no_person_is_the_owner_s(self):
         with self.assertRaises(ValueError):
             ap.run(["grant", "--kind", "merge", "--target", self.ON_POND, "--for", "ada", "--person", "owner"])
