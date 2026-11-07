@@ -104,8 +104,7 @@ class Approvals(unittest.TestCase):
         r = self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})
         self.assertEqual(r["body"]["exit"], 0, r)
         got = json.loads(r["body"]["stdout"])
-        self.assertEqual({k: got[k] for k in ("id", "state", "kind", "target")},
-                         {"id": aid, "state": "pending", "kind": "github-write", "target": "acme/app:octocat"})
+        self.assertEqual(got, {"id": aid, "agent": "ada", "state": "pending", "kind": "github-write", "target": "acme/app:octocat", "expires": None})
         ap.ui_act({"action": "allow", "fields": {"id": aid}})
         got = json.loads(self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})["body"]["stdout"])
         self.assertEqual(got["state"], "allowed")

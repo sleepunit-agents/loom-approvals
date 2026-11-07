@@ -364,9 +364,8 @@ def spend_card(caller, aid):
     a = get(aid)
     if spender(a["who"]) != spender(who):
         raise PermissionError(f"{aid} isn't {who['agent']}'s; check {aid} gives its state")
-    return {"id": a["id"], "state": a["state"], "kind": a["kind"], "target": a["target"],
-            "expires": a.get("expires") if a["state"] == "allowed" else None,
-            "ask": a.get("ask") or a.get("what"), "asked_at": a.get("at")}
+    return {"id": a["id"], "agent": a["who"].get("agent"), "state": a["state"], "kind": a["kind"], "target": a["target"],
+            "expires": a.get("expires") if a["state"] == "allowed" else None}
 
 
 def use(caller, aid, kind, target):
