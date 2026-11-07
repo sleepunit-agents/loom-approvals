@@ -99,6 +99,13 @@ class Approvals(unittest.TestCase):
         self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"], {"kind": "agent", "agent": "ada", "house": "h-10"})["body"]["exit"], 0)
         self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"], svc)["body"]["exit"], 1)
 
+    def test_another_body_asking_again_gets_the_card_but_doesn_t_reword_it(self):
+        aid = self.ask(caller={"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"})
+        r = self.api(["request", "--kind", "github-write", "--target", "acme/app:octocat", "--ask", "OK to push the fix to the app now?",
+                      "--why", "It's ready.", "--if-yes", "It goes out.", "--if-no", "It waits."], {"kind": "agent", "agent": "ada", "house": "h-9"})
+        self.assertTrue(r["body"]["stdout"].startswith(aid), r)
+        self.assertNotIn("ask", ap.get(aid))
+
     def test_check_json_tells_the_agent_that_asked_exactly_what_to_spend_it_on(self):
         aid = self.ask(caller={"kind": "agent", "agent": "ada", "house": "h-8", "service": "chat"})
         r = self.api(["check", aid, "--json"], {"kind": "agent", "agent": "ada", "house": "h-9"})
