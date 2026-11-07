@@ -18,7 +18,7 @@ Standing rules (loom docs/specs/changes.md): the owner's lasting answer for merg
                                 (TARGET is <forge>:<locator>#<n>@<head>, e.g. github:acme/app#12@<40 hex>)
     approvals tell --kind merge --target TARGET --what "…"
                                 after merging under a do or tell rule: an FYI on loom's Inbox
-    approvals grant --kind merge --target TARGET --for AGENT --by MEMBER [--deny]
+    approvals grant --kind merge --target TARGET --for AGENT --by MEMBER [--person SLUG] [--deny]
                                 loom's machine only (the Changes piece's Yes and Not yet): the owner's answer
                                 before, or instead of, the agent's request
 
@@ -45,6 +45,15 @@ Settings (environment; a managed piece gets them from loom):
                          [{"kind": "merge", "scope": "github:acme/*", "tier": "do"}]
   APPROVALS_PROJECTS     the command that lists project cards, for project:<slug> rules
                          (default: loom project list --json)
+  APPROVALS_PRINCIPAL    the runtime's command for on whose behalf a body acts (default: loom runtime principal):
+                         `<it> --verify` checks a statement on stdin
+  APPROVALS_LOCAL_PRINCIPAL  who a call on loom's machine itself acts for, with no statement: owner (default) or unknown
+
+On whose behalf (t-1943): the owner's standing rules and his yes cover work done for him. A body acting for anyone
+else (a person in Slack or Discord, a body they steer) gets the grants he set for that person, or asks; a card names
+who it's for, and an approval asked for one person is spent only for them. Who a body acts for is the runtime's word
+(a statement it signs, `--principal`, which a house's piece-call adds), never the body's: none means someone loom
+can't name, never the owner.
 """
 import argparse
 import fcntl
@@ -122,6 +131,11 @@ PATTERN_CHARS = set("*?[]{}!\\")
 TIERS = ("do", "tell", "ask")
 RULE_KINDS = ("merge",)
 RULES_MAX = 100
+GRANTS_MAX = 100
+PERSON = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+# A principal: on whose behalf an action is (t-1943). "owner": the owner's own work; a person's slug; "?": someone loom
+# can't name (no statement, several people, a relay). Only "owner" reads the standing rules.
+OWNER, UNKNOWN = "owner", "?"
 
 
 def now():
@@ -169,7 +183,7 @@ class Store:
             self.d = json.loads(self.path.read_text())
         except (OSError, ValueError):
             self.d = {"v": 1, "approvals": {}}
-        self._rules = None
+        self._rules, self._grants = None, []
         return self
 
     def save(self):
@@ -186,25 +200,43 @@ class Store:
             return self._rules
         path = STATE / "rules.json"
         self.rules_broken = False
+        self._grants = []
         try:
-            rows = json.loads(path.read_text())["rules"]
+            doc = json.loads(path.read_text())
+            rows = doc["rules"]
             if not isinstance(rows, list):
                 raise TypeError("rules isn't a list")
             self._rules = [r for r in rows if well_formed(r)]
             if len(self._rules) != len(rows):
                 self.rules_broken = True
+            # The owner's grants for other people (t-1943), beside the rules: none yet is none.
+            grants = doc.get("grants", [])
+            if not isinstance(grants, list):
+                raise TypeError("grants isn't a list")
+            self._grants = [g for g in grants if well_formed_grant(g)]
+            if len(self._grants) != len(grants):
+                self.rules_broken = True
         except FileNotFoundError:
             self._rules = seed_rules()
-            self.write_json(path, {"v": 1, "rules": self._rules})
+            self.write_json(path, {"v": 1, "rules": self._rules, "grants": []})
         except (OSError, ValueError, KeyError, TypeError):
-            self._rules, self.rules_broken = [], True
+            self._rules, self._grants, self.rules_broken = [], [], True
         return self._rules
 
-    def replace_rules(self, rules):
+    def grants(self):
+        """The owner's grants for other people (rules.json's "grants"), read with the rules. A file that can't be read
+        has none, so a body acting for anyone but the owner asks (fails closed)."""
+        self.rules()
+        return self._grants
+
+    def replace_rules(self, rules, grants=None):
+        self.rules()        # the grants are read with the rules: an edit of one never writes the other away
         if self.rules_broken:
             raise ValueError("rules.json can't be read as it is; fix or remove it on loom's machine before changing a rule")
         self._rules = rules
-        self.write_json(STATE / "rules.json", {"v": 1, "rules": rules})
+        if grants is not None:
+            self._grants = grants
+        self.write_json(STATE / "rules.json", {"v": 1, "rules": self._rules, "grants": self._grants})
 
     @staticmethod
     def write_json(path, obj):
@@ -279,14 +311,115 @@ def may_spend(asked, who):
     return svc is None or svc == service_of(asked)
 
 
+def verify_statement(statement):
+    """The runtime's word on a statement (`loom runtime principal --verify`): {agent, for, owner, people} or None."""
+    cmd = setting("APPROVALS_PRINCIPAL", "loom runtime principal")
+    try:
+        out = subprocess.run([*shlex.split(cmd), "--verify"], input=statement, capture_output=True, text=True, timeout=10)
+        r = json.loads(out.stdout or "{}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return r if isinstance(r, dict) and r.get("ok") is True and out.returncode == 0 else None
+
+
+def principal_of(who, statement=None, local=False):
+    """On whose behalf `who` acts: {"for": "owner" | slug | "?", "people": [slugs]}. From the runtime's signed statement
+    for this agent, else (a call on loom's machine itself, `local`) APPROVALS_LOCAL_PRINCIPAL, else "?". A statement
+    for another agent, or one that doesn't verify, is "?": never the owner by default."""
+    if statement:
+        v = verify_statement(statement)
+        if not v or v.get("agent") != who.get("agent"):
+            return {"for": UNKNOWN, "people": []}
+        people = [p for p in (v.get("people") or []) if isinstance(p, str) and PERSON.fullmatch(p)][:20]
+        if v.get("owner") is True:
+            return {"for": OWNER, "people": []}
+        f = v.get("for")
+        # A person whose slug is "owner" is a person, not the owner: unknown here, since the words are the same.
+        return {"for": f if isinstance(f, str) and PERSON.fullmatch(f) and f != OWNER else UNKNOWN, "people": people}
+    if local and not LOCAL_BODY:
+        return {"for": OWNER if setting("APPROVALS_LOCAL_PRINCIPAL", OWNER) == OWNER else UNKNOWN, "people": []}
+    return {"for": UNKNOWN, "people": []}
+
+
+# A body the runtime runs on loom's machine (a local wake) is in a conversation, like a house's: it acts for whom that
+# conversation says, never for the owner by being here. main() fetches its statement; without one it's unknown.
+LOCAL_BODY = False
+
+
+def fetch_statement(conversation):
+    """This body's statement from the runtime (`loom runtime principal --conversation cv`), or None. In a house that's
+    the house's own `loom-runtime` (loom-box installs it there): APPROVALS_PRINCIPAL is a setting of loom's machine."""
+    cmd = "loom-runtime principal" if in_a_house() else setting("APPROVALS_PRINCIPAL", "loom runtime principal")
+    try:
+        out = subprocess.run([*shlex.split(cmd), "--conversation", conversation], capture_output=True, text=True,
+                             timeout=30, stdin=subprocess.DEVNULL)
+        r = json.loads(out.stdout or "{}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    st = r.get("statement") if isinstance(r, dict) and r.get("ok") is True else None
+    # Opaque: the runtime's to read (--verify). One word, of a size a command line carries.
+    return st if isinstance(st, str) and 0 < len(st) <= 1100 and not re.search(r"\s", st) else None
+
+
+def for_of(a):
+    """An approval's principal; one from before principals was asked as the owner's (they lasted 8 hours at most)."""
+    f = a.get("for", OWNER)
+    return f if f in (OWNER, UNKNOWN) or PERSON.fullmatch(str(f)) else UNKNOWN
+
+
+def same_principal(a, p):
+    """Whether approval `a` was asked for principal `p`: the same owner, person, or (someone loom can't name) the same
+    people it named, so a card that read "for Loren and Dan" is never spent for Eve."""
+    f = for_of(a)
+    if f != p["for"]:
+        return False
+    return f != UNKNOWN or sorted(a.get("people") or []) == sorted(p.get("people") or [])
+
+
+def person_name(slug):
+    """A person's slug as a name: "loren" -> "Loren", "loren-smith" -> "Loren Smith"."""
+    return " ".join(w[:1].upper() + w[1:] for w in str(slug).split("-") if w)
+
+
+def for_words(a):
+    """Who it's for, in words, or None for the owner's own: "Loren", "Loren and Dan", "someone loom can't name"."""
+    f = for_of(a)
+    if f == OWNER:
+        return None
+    if f != UNKNOWN:
+        return person_name(f)[:40]
+    people = [person_name(p)[:40] for p in a.get("people") or []]
+    if len(people) > 3:
+        return f"{', '.join(people[:2])} and {len(people) - 2} others"
+    if len(people) > 1:
+        return ", ".join(people[:-1]) + " and " + people[-1]
+    return "someone loom can't name"
+
+
+def principal_for_call(caller, who, statement=None, acting_for=False, on_behalf=None):
+    """On whose behalf this call is. A piece on loom's machine acting for a body (--as) may say it (--on-behalf: the
+    clock, whom the wake is for); otherwise the runtime's statement, or loom's machine's own setting, or unknown."""
+    if acting_for and on_behalf:
+        return {"for": on_behalf if on_behalf == OWNER or PERSON.fullmatch(on_behalf) else UNKNOWN, "people": []}
+    return principal_of(who, statement, local=caller is None)
+
+
+def principal_words(p):
+    """A principal ({"for", "people"}) in words, as for_words says an approval's: "you" for the owner."""
+    return for_words({"for": p["for"], "people": p.get("people") or []}) or "you"
+
+
 DETAILS_MAX = 1000
 
 
 CONVERSATION = re.compile(r"cv-[0-9a-f]{12}")
 
 
-def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None, conversation=None):
+def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None,
+            conversation=None, statement=None, on_behalf=None):
     who = who_of(caller)
+    # On whose behalf (t-1943): kept on the card, which names them, and what it may be spent for.
+    p = principal_for_call(caller, who, statement, acting_for, on_behalf)
     # The conversation the body says it asked from (loom docs/specs/comms.md, "Asks inline"): a Comms thread shows its
     # own pending approvals. It's the body's claim, not something loom vouches for: the caller loom authenticates is an
     # agent (and its house), never a conversation. So it decides nothing about the approval, and loom shows the ask in
@@ -333,7 +466,8 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
-            if a["kind"] == kind and a["target"] == target and may_spend(a["who"], who) and state_of(a) in ("pending", "allowed"):
+            if a["kind"] == kind and a["target"] == target and may_spend(a["who"], who) and same_principal(a, p) \
+                    and state_of(a) in ("pending", "allowed"):
                 # A caller that now says it plainly: a pending card takes the plain words (the owner hasn't read it yet).
                 # Only the body the card names, so the words the owner reads are the ones its "from" says.
                 if words and state_of(a) == "pending" and not a.get("ask") and a["who"] == who:
@@ -345,7 +479,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
                 return a
         # The owner answered this exact target already (approvals grant): that's the answer, newest first.
         granted = sorted((a for a in s.d["approvals"].values() if a.get("granted") and a["kind"] == kind
-                          and a["target"] == target and a["who"].get("agent") == who["agent"]
+                          and a["target"] == target and a["who"].get("agent") == who["agent"] and same_principal(a, p)
                           and state_of(a) in ("allowed", "denied")), key=lambda a: a["at"], reverse=True)
         if granted:
             return {**granted[0], "state": state_of(granted[0])}
@@ -353,7 +487,8 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
              **{k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v},
              # Kept with the agent loom authenticated: the pair is what a thread checks (see request's note).
              **({"conversation": conversation} if conversation else {}),
-             "who": who, "minutes": mins, "at": iso(now()), "state": "pending"}
+             "who": who, "for": p["for"], **({"people": p["people"]} if p["people"] else {}),
+             "minutes": mins, "at": iso(now()), "state": "pending"}
         s.d["approvals"][a["id"]] = a
         s.save()
         s.log("request", a, what=what, why=why)
@@ -376,18 +511,21 @@ def spend_card(caller, aid):
     a = get(aid)
     if not may_spend(a["who"], who):
         raise PermissionError(f"{aid} isn't {who['agent']}'s to read here; check {aid} gives its state")
-    return {"id": a["id"], "agent": a["who"].get("agent"), "state": a["state"], "kind": a["kind"], "target": a["target"],
+    return {"id": a["id"], "agent": a["who"].get("agent"), "for": for_of(a), "state": a["state"], "kind": a["kind"], "target": a["target"],
             "expires": a.get("expires") if a["state"] == "allowed" else None}
 
 
-def use(caller, aid, kind, target, acting_for=False):
-    """Spend an allowed approval for exactly the action it allowed. True once."""
+def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=None, unstated=False):
+    """Spend an allowed approval for exactly the action it allowed, for the one it was asked for. True once.
+    `unstated`: a piece on loom's machine spending for a body (--as) without saying on whose behalf (--on-behalf): the
+    runtime's relay, which has no conversation to ask about. Everything else is checked; whom it was for isn't."""
     if kind in PIECE_KINDS and not acting_for:
         # Spent by the piece that runs it (the clock sets the wake), never by a body: a body's own `use` would
         # spend the owner's yes and run nothing.
         raise PermissionError(f"a {kind} approval is spent by the piece on loom's machine that runs it, not by a body")
     who = who_of(caller)
     target = exact_target(target)
+    p = principal_for_call(caller, who, statement, acting_for, on_behalf)
     with Store() as s:
         a = s.d["approvals"].get(aid)
         if not a:
@@ -403,6 +541,11 @@ def use(caller, aid, kind, target, acting_for=False):
         if a["kind"] != kind or a["target"] != target:
             s.log("refused-use", a, kind_used=kind, target_used=target)
             raise PermissionError(f"{aid} allows {a['kind']} for {a['target']}, not {kind} for {target}")
+        # For the one it was asked for, and nobody else (t-1943): the owner's yes for Loren isn't a yes for Dan, or for
+        # the owner's own work, and his yes for himself isn't one for Loren.
+        if not unstated and not same_principal(a, p):
+            s.log("refused-use", a, for_used=p["for"])
+            raise PermissionError(f"{aid} was asked for {for_words(a) or 'the owner'}; this body acts for {principal_words(p)}")
         last = newest_decision(s.d["approvals"].values(), kind, target, a["who"].get("agent"))
         if last and last["id"] != aid and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
             s.log("refused-use", a, denied_by=last["id"])
@@ -530,6 +673,39 @@ def well_formed(r):
         and isinstance(r.get("scope"), str) and valid_scope(r["scope"])
 
 
+def well_formed_grant(g):
+    """A grant (t-1943): the owner's standing answer for one other person, a rule with a person."""
+    return well_formed(g) and isinstance(g.get("person"), str) and PERSON.fullmatch(g["person"]) is not None
+
+
+def make_grant(person, kind, scope, tier, by):
+    person = str(person or "").strip().lower()
+    if not PERSON.fullmatch(person) or len(person) > 80:
+        raise ValueError("a grant names a person by their slug, like loren or loren-smith")
+    if person == OWNER:
+        raise ValueError("owner is the word for your own work (your rules above), not a person to grant")
+    return {"person": person, **make_rule(kind, scope, tier, by)}
+
+
+def with_grant(grants, person, kind, scope, tier, by):
+    """The grants with (person, kind, scope) set to tier, or removed for tier none."""
+    g = make_grant(person, kind, scope, "ask" if tier == "none" else tier, by)
+    rest = [x for x in grants if not (x["person"] == g["person"] and x["kind"] == kind and x["scope"] == g["scope"])]
+    if tier == "none":
+        return rest, g
+    if len(rest) >= GRANTS_MAX:
+        raise ValueError(f"{GRANTS_MAX} grants at most")
+    return rest + [g], g
+
+
+def set_grant(person, kind, scope, tier, by):
+    """The owner's edit, on the page: a grant for one person; tier none removes it."""
+    with Store() as s:
+        grants, g = with_grant(s.grants(), person, kind, scope, tier, by)
+        s.replace_rules(list(s.rules()), grants)
+        return g
+
+
 def valid_scope(scope):
     """project:<slug>, exactly; or <forge>:<pattern>, where forge is never "project" (that's a project's)."""
     if scope.startswith("project:"):
@@ -627,31 +803,48 @@ def needs_cards(rules):
     return any(r.get("scope", "").startswith("project:") for r in rules)
 
 
-def rules_for(agent, kind, targets):
-    """Each target's tier and, for ask, the newest merge approval for it and this agent: {target: {tier, approval?}}."""
+UNKNOWN_NOTE = "this body acts for someone loom can't name (no word from the runtime, or several people), so it asks"
+
+
+def rules_for(agent, kind, targets, principal=OWNER, people=()):
+    """Each target's tier and, for ask, the newest merge approval for it, this agent and this principal:
+    {target: {tier, approval?}}. The standing rules are the owner's own work's (t-1943); for anyone else, the grants the
+    owner set for that person; for someone loom can't name, ask."""
     if kind not in RULE_KINDS:
         raise ValueError(f"only {', '.join(RULE_KINDS)} has standing rules")
     with Store() as s:
         rules = list(s.rules())
-        rows = [a for a in s.d["approvals"].values() if a["kind"] == kind and a["who"].get("agent") == agent]
+        if principal != OWNER:
+            rules = [g for g in s.grants() if g["person"] == principal]
+        rows = [a for a in s.d["approvals"].values() if a["kind"] == kind and a["who"].get("agent") == agent
+                and same_principal(a, {"for": principal, "people": people})]
     cards = projects() if needs_cards(rules) else []
     out = {}
     for t in targets:
-        tier, rule, note = resolve(rules, kind, t, cards)
+        if principal == UNKNOWN:
+            if not repo_of(t):
+                raise ValueError("a merge target is <forge>:<locator>#<n>@<40-hex head>, like github:acme/app#12@…")
+            tier, rule, note = "ask", None, UNKNOWN_NOTE
+        else:
+            tier, rule, note = resolve(rules, kind, t, cards)
         mine = sorted((a for a in rows if a["target"] == t), key=lambda a: a["at"], reverse=True)
-        out[t] = {"tier": tier, **({"scope": rule["scope"]} if rule else {}), **({"note": note} if note else {}),
+        out[t] = {"tier": tier, "for": principal, **({"scope": rule["scope"]} if rule else {}), **({"note": note} if note else {}),
                   **({"approval": {"id": mine[0]["id"], "state": state_of(mine[0])}} if mine else {})}
     return out
 
 
-def rule_answer(caller, kind, targets, agent=None, as_json=False):
-    """`rule merge TARGET…`: for the asking agent, or (loom's machine only) --for another agent."""
+def rule_answer(caller, kind, targets, agent=None, as_json=False, statement=None):
+    """`rule merge TARGET…`: for the asking agent, or (loom's machine only) --for another agent, as the owner's own
+    work (the Changes piece shows the owner his own rules). On whose behalf decides which rules: rules_for."""
     if agent and caller:
         raise PermissionError("--for is for loom's machine (the Changes piece), not over the API")
     if not 1 <= len(targets) <= 200:
         raise ValueError("rule merge TARGET [TARGET…], 200 at most")
     who = {"agent": agent} if agent else who_of(caller)
-    res = rules_for(who["agent"], kind, targets)
+    # --for (loom's machine): the Changes piece's view, as any call here is: the statement if there is one, else
+    # APPROVALS_LOCAL_PRINCIPAL; a local body is never the owner for being here.
+    p = principal_for_call(caller, who, statement)
+    res = rules_for(who["agent"], kind, targets, p["for"], p.get("people") or ())
     if as_json:
         return json.dumps(res) + "\n", ""
     out = []
@@ -693,36 +886,48 @@ def always(aid, by, cards):
             raise PermissionError(f"it's already {state_of(a)}")
         al = always_scope(a, cards)
         if not al:
-            raise ValueError("Always is for a merge of one repo")
-        rules, _ = with_rule(s.rules(), "merge", al[0], "do", by)
+            raise ValueError("Always is for a merge of one repo, for you or for one person")
+        f = for_of(a)
+        # For the owner's own work, his standing rule; for one other person, his grant for them (t-1943).
+        if f == OWNER:
+            rules, grants = with_rule(s.rules(), "merge", al[0], "do", by)[0], None
+        else:
+            rules, grants = list(s.rules()), with_grant(s.grants(), f, "merge", al[0], "do", by)[0]
         t = now()
         a["state"], a["decided"] = "allowed", iso(t)
         if by:
             a["by"] = by
         a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + a["minutes"] * 60, timezone.utc))
-        s.replace_rules(rules)
+        s.replace_rules(rules, grants)
         s.save()
-        s.log("allow", a, always=al[0])
+        s.log("allow", a, always=al[0], **({"for": f} if f != OWNER else {}))
         return a, al
 
 
-def grant(kind, target, agent, by, deny=False):
+def grant(kind, target, agent, by, deny=False, person=OWNER):
     """The owner's answer from loom's machine (the Changes piece's Yes and Not yet): answers the agent's pending
-    request for TARGET, or makes the answer for one it hasn't made yet."""
+    request for TARGET, or makes the answer for one it hasn't made yet. For the owner's own work unless --person names
+    whom it's for (t-1943): a yes for himself is never one for someone else."""
+    raw, person = person, OWNER if person == OWNER else str(person or "").strip().lower()
+    if raw != OWNER and person == OWNER:
+        raise ValueError("--person owner is the owner's own work: leave --person out")
+    if person != OWNER and not (PERSON.fullmatch(person) and len(person) <= 80):
+        raise ValueError("--person is the slug of whom it's for")
     if kind != "merge" or not repo_of(target):
         raise ValueError("grant is for a merge approval: --kind merge --target <forge>:<locator>#<n>@<head>")
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", agent or ""):
         raise ValueError("--for is the agent whose change it is")
     with Store() as s:
         pending = sorted((a for a in s.d["approvals"].values() if a["kind"] == kind and a["target"] == target
-                          and a["who"].get("agent") == agent and state_of(a) == "pending"), key=lambda a: a["at"])
+                          and a["who"].get("agent") == agent and for_of(a) == person and state_of(a) == "pending"),
+                         key=lambda a: a["at"])
     if pending:
         return answer(pending[-1]["id"], "deny" if deny else "allow", by, minutes=GRANT_MIN)
     with Store() as s:
         t = now()
         a = {"id": "a-" + secrets.token_hex(4), "kind": kind, "target": target,
              "what": f"merge {target.split('@')[0]}", "why": "the owner said " + ("not yet" if deny else "yes, merge it"),
-             "who": {"agent": agent, "where": "any"}, "granted": True, "minutes": GRANT_MIN, "at": iso(t),
+             "who": {"agent": agent, "where": "any"}, "for": person, "granted": True, "minutes": GRANT_MIN, "at": iso(t),
              "state": "denied" if deny else "allowed", "decided": iso(t)}
         if by:
             a["by"] = by
@@ -736,22 +941,23 @@ def grant(kind, target, agent, by, deny=False):
         return a
 
 
-def tell(caller, kind, target, what):
-    """After merging under a do or tell rule: an FYI for the owner (the manifest's notices)."""
+def tell(caller, kind, target, what, statement=None):
+    """After merging under a do or tell rule (or grant): an FYI for the owner (the manifest's notices)."""
     who = who_of(caller)
+    p = principal_for_call(caller, who, statement)
     if len(plain(what, 10**6)) > WORDS_MAX:
         raise ValueError(f"--what is {WORDS_MAX} characters at most as shown; say it shorter")
     what = plain(what, WORDS_MAX)
     if not what:
         raise ValueError("--what says what was merged, for the owner")
-    with Store() as s:
-        rules = list(s.rules())
-    tier, _, note = resolve(rules, kind, target, projects() if needs_cards(rules) else [])
+    r = rules_for(who["agent"], kind, [target], p["for"], p.get("people") or ())[target]
+    tier, note = r["tier"], r.get("note")
     if tier == "ask":
         raise PermissionError(f"{note}: request a merge approval instead" if note else
                               f"the rule for {target.split('@')[0]} is ask me: request a merge approval instead")
     with Store() as s:
-        n = {"at": iso(now()), "agent": who["agent"], "kind": kind, "target": target, "what": what}
+        n = {"at": iso(now()), "agent": who["agent"], "kind": kind, "target": target, "what": what,
+             **({"for": p["for"]} if p["for"] != OWNER else {})}
         s.d.setdefault("notices", []).insert(0, n)
         s.d["notices"] = s.d["notices"][:NOTICES_KEEP]
         s.save()
@@ -817,21 +1023,44 @@ def notice_of(n):
     tgt = n.get("target", "")
     r = repo_of(tgt)
     change = f"{r['locator']}#{r['number']}" if r else tgt.split("@")[0]
-    return {"text": f"{name_of(n.get('agent'))} merged {change}", "meta": n.get("what") or "under a tell me after rule",
+    whose = f" for {person_name(n['for'])}" if n.get("for") and n["for"] != OWNER else ""
+    return {"text": f"{name_of(n.get('agent'))} merged {change}{whose}", "meta": n.get("what") or "under a tell me after rule",
             "at": n["at"], "agent": n.get("agent"), "page": ""}
 
 
 NO_ASK = "(no plain question given)"
 
 
-def headline(a):
-    """The card's headline: the plain ask, whole; an old-style request reads as itself, marked, so it gets fixed."""
+def body_ask(a):
+    """The body's own question: the plain ask, whole; an old-style request reads as itself, marked, so it gets fixed."""
     return a["ask"] if a.get("ask") else f"{NO_ASK} {cap(what_of(a))}"
 
 
+def headline(a):
+    """The card's headline. For the owner's own work, the body's plain ask. For anyone else's (t-1943) it says whose,
+    first: a merge as "Merge on-pond#220 for Loren?", anything else as "For Loren: <the ask>". The words are the
+    piece's, never the body's: the body can't make a card for Loren read as the owner's."""
+    fw = for_words(a)
+    if not fw:
+        return body_ask(a)
+    r = repo_of(a.get("target")) if a.get("kind") == "merge" else None
+    if r:
+        return f"Merge {r['locator'].split('/')[-1]}#{r['number']} for {fw}?"
+    return f"For {fw}: {body_ask(a)}"
+
+
+def ask_detail(a):
+    """What the sheet says under the headline when the headline isn't the body's own ask (a merge for someone else)."""
+    return body_ask(a) if headline(a) != body_ask(a) and not headline(a).endswith(body_ask(a)) else None
+
+
 def fine_print(a):
-    """Exactly what Allow allows: the kind and target (machine fields), where it was asked from, for how long."""
-    return f"{kind_of(a)}, {from_of(a)}. Allowing it lets that one action through once, within {a['minutes']} min."
+    """Exactly what Allow allows: the kind and target (machine fields), where it was asked from, for whom, for how long."""
+    fw = for_words(a)
+    named = a.get("people") or []
+    everyone = f" ({', '.join(person_name(p) for p in named)})" if len(named) > 3 else ""
+    whose = f" It's for {fw}{everyone}, not for you: it's spent only for {fw}." if fw else ""
+    return f"{kind_of(a)}, {from_of(a)}.{whose} Allowing it lets that one action through once, within {a['minutes']} min."
 
 
 def ui_manifest():
@@ -847,14 +1076,15 @@ def ui_manifest():
         # The structured ask (loom's Inbox and Home show these whole, Allow beside "If you allow", Deny beside "If you
         # deny"); fine is the small print under "Exactly what this allows".
         **({"why": a["why"], "if_yes": a["if_yes"], "if_no": a["if_no"]} if a.get("ask") else {}),
-        **({"details": a["details"]} if a.get("details") else {}),
+        **({"details": "\n\n".join(x for x in (ask_detail(a), a.get("details")) if x)} if ask_detail(a) or a.get("details") else {}),
+        **({"for": for_of(a)} if for_of(a) != OWNER else {}),
         "fine": fine_print(a),
         "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
         **({"conversation": a["conversation"]} if a.get("conversation") else {}),
         "actions": [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}},
                     {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}],
     } for a in pending], "answered": [{
-        "text": (a["ask"] if a.get("ask") else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
+        "text": (headline(a) if a.get("ask") or for_words(a) else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
         "outcome": OUTCOME[a["state"]] + (f" ({'Allowed' if a['state'] != 'denied' else 'Denied'} by {a['by']}.)" if a.get("by") else ""),
         "at": a.get("used") or a.get("decided") or a["at"], "kind": "permission", "agent": a["who"]["agent"], "page": "",
     } for a in done], "notices": [notice_of(n) for n in notices()[:20]]}
@@ -913,10 +1143,15 @@ def always_scope(a, cards):
     r = repo_of(a.get("target"))
     if a.get("kind") != "merge" or not r or PATTERN_CHARS & set(r["repo"]):
         return None        # never a pattern from a body's target: refused, not escaped
+    f = for_of(a)
+    if f == UNKNOWN:
+        return None        # nobody to grant it to: someone loom can't name gets no standing yes
+    # For someone else, Always is a grant for that person (t-1943), and says so.
+    lead = "Always" if f == OWNER else f"Always for {person_name(f)} on"
     for c in cards or []:
         if r["repo"] in c["repos"]:
-            return f"project:{c['slug']}", f"Always for {c['name']}"
-    return r["repo"], f"Always for {r['locator']}"
+            return f"project:{c['slug']}", (f"Always for {c['name']}" if f == OWNER else f"{lead} {c['name']}")
+    return r["repo"], (f"Always for {r['locator']}" if f == OWNER else f"{lead} {r['locator']}")
 
 
 def answers_of(a, cards=None):
@@ -947,7 +1182,7 @@ def record_text(rows):
     """The record's lines, newest first, as many as fit in one code block; then how many older ones there are."""
     out, used = [], 0
     for n, a in enumerate(rows):
-        line = f"{a['id']}  {a['state']}  {a['kind']}  {a['target']}  {a['who'].get('agent')}@{a['who'].get('where')}"
+        line = f"{a['id']}  {a['state']}  {a['kind']}  {a['target']}  {a['who'].get('agent')}@{a['who'].get('where')}  for {for_of(a)}"
         if used + len(line) + 1 > RECORD_MAX - 60:
             out.append(f"… and {len(rows) - n} older (approvals list, on loom's machine)")
             break
@@ -965,7 +1200,7 @@ def ui_page(req):
     owner = is_owner(req)
     if owner:
         with Store() as s:
-            proj_rules = any(r["scope"].startswith("project:") for r in s.rules())
+            proj_rules = any(r["scope"].startswith("project:") for r in [*s.rules(), *s.grants()])
     cards = projects() if owner and (proj_rules or any(a["kind"] == "merge" for a in pending)) else None
     sections = []
     if pending:
@@ -975,6 +1210,7 @@ def ui_page(req):
             "value": a["why"], "detail": f"{name_of(a['who']['agent'])} · {ago(a['at'])}",
             "sheet": {"title": f"{name_of(a['who']['agent'])} asks", "blocks": [
                 {"type": "text", "text": headline(a)},
+                *([{"type": "text", "text": ask_detail(a)}] if ask_detail(a) else []),
                 {"type": "text", "text": a["why"]},
                 *([{"type": "kv", "items": [{"label": "If you allow", "value": a["if_yes"]}, {"label": "If you deny", "value": a["if_no"]}]}]
                   if a.get("if_yes") else []),
@@ -991,13 +1227,13 @@ def ui_page(req):
         sections.append(rules_section(cards))
     if past:
         sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
-            "text": a.get("ask") or f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
+            "text": headline(a) if a.get("ask") or for_words(a) else f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
             "tone": {"denied": "bad", "expired": "muted"}.get(a["state"]),
         } for a in past]}]})
     if rows:
         sections.append({"id": "record", "blocks": [{"type": "panel", "rows": [{
             "label": "The record", "value": "Each approval's id, kind and exact target",
-            "sheet": {"title": "The record", "blocks": [{"type": "code", "label": "id  state  kind  target  asked from",
+            "sheet": {"title": "The record", "blocks": [{"type": "code", "label": "id  state  kind  target  asked from  for",
                 "text": record_text(rows)}]},
         }]}]})
     return {"title": "Approvals",
@@ -1042,8 +1278,34 @@ def rules_section(cards):
                                       "hint": "github:acme/* or project:pond"},
                                      {"name": "tier", "label": "Then", "kind": "segmented", "value": "ask",
                                       "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS]}]}})
-    blocks = [{"type": "panel", "title": "Merging", "rows": rows}]
+    blocks = [{"type": "panel", "title": "Merging, for you", "rows": rows}, grants_panel(cards)]
     return {"id": "rules", "title": "Standing rules", "fold": "open", "blocks": blocks}
+
+
+def grants_panel(cards):
+    """The owner's grants for other people (t-1943), beside his own rules: work an agent does on someone else's
+    behalf never reads his rules, only what he granted that person here; with nothing granted, it asks him."""
+    with Store() as s:
+        grants = list(s.grants())
+    rows = [{
+        "label": f"{person_name(g['person'])}: {scope_words(g['scope'], cards)}", "value": TIER_WORDS[g["tier"]],
+        "detail": TIER_DETAIL[g["tier"]] + f", when the work is for {person_name(g['person'])}",
+        **({"tone": "warn"} if g["tier"] == "ask" else {}),
+        "choice": {"action": "grant", "name": "tier", "value": g["tier"],
+                   "fields": {"person": g["person"], "scope": g["scope"], "kind": g["kind"]},
+                   "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS] + [{"value": "none", "label": "No grant"}]},
+    } for g in sorted(grants, key=lambda g: (g["person"], STRICT[g["tier"]], g["scope"]))]
+    rows.append({"label": "Add a grant for someone", "value": "Merges an agent does for another person",
+                 "edit": {"action": "grant-add", "title": "Add a grant for someone", "submit": "Add the grant",
+                          "note": "Your rules above are for work done for you. Work an agent does for someone else "
+                                  "(a person in Slack or Discord) asks you, unless you grant that person something here.",
+                          "fields": [{"name": "person", "label": "Who", "kind": "text", "required": True,
+                                      "hint": "their slug, like loren"},
+                                     {"name": "scope", "label": "For", "kind": "text", "required": True,
+                                      "hint": "github:onterris/on-pond or project:pond"},
+                                     {"name": "tier", "label": "Then", "kind": "segmented", "value": "ask",
+                                      "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS]}]}})
+    return {"type": "panel", "title": "Merging, for other people", "rows": rows}
 
 
 def is_owner(req):
@@ -1073,6 +1335,17 @@ def ui_act(req):
             return {"ok": False, "message": str(e), "page": ""}
         words = scope_words(r["scope"], projects() if r["scope"].startswith("project:") else [])
         return {"ok": True, "message": f"{words}: " + ("no rule now, so it asks" if f.get("tier") == "none" else TIER_WORDS[r["tier"]].lower()), "page": ""}
+    if action in ("grant", "grant-add"):
+        # The owner's grants for other people (t-1943): his alone, on this page, never through the API.
+        if not is_owner(req):
+            return {"ok": False, "message": "Grants for other people are the household owner's.", "page": ""}
+        try:
+            g = set_grant(f.get("person"), f.get("kind") or "merge", f.get("scope"), f.get("tier"), caller_who(req))
+        except ValueError as e:
+            return {"ok": False, "message": str(e), "page": ""}
+        words = scope_words(g["scope"], projects() if g["scope"].startswith("project:") else [])
+        return {"ok": True, "message": f"For {person_name(g['person'])}, {words}: "
+                + ("no grant now, so it asks" if f.get("tier") == "none" else TIER_WORDS[g["tier"]].lower()), "page": ""}
     aid = f.get("id", "")
     if action == "always":
         if not is_owner(req):
@@ -1084,7 +1357,9 @@ def ui_act(req):
             _, al = always(aid, caller_who(req), cards)
         except (LookupError, PermissionError, ValueError) as e:
             return {"ok": False, "message": str(e), "page": ""}
-        return {"ok": True, "message": f"Allowed, and from now on: {scope_words(al[0], cards)}, just do it.", "page": ""}
+        a = get(aid)
+        whose = "" if for_of(a) == OWNER else f" for {person_name(for_of(a))}"
+        return {"ok": True, "message": f"Allowed, and from now on{whose}: {scope_words(al[0], cards)}, just do it.", "page": ""}
     if action not in ("allow", "deny") or not ID.match(str(aid)):
         return {"ok": False, "message": "That isn't an approval.", "page": ""}
     try:
@@ -1127,7 +1402,7 @@ def api_answer(req):
     if caller.get("kind") != "agent":
         return refuse(403, "only an agent's bodies ask here; the owner answers on the page")
     argv = (req.get("body") or {}).get("argv")
-    if not isinstance(argv, list) or not 1 <= len(argv) <= 24 or not all(isinstance(a, str) and len(a) <= 1100 for a in argv):
+    if not isinstance(argv, list) or not 1 <= len(argv) <= 26 or not all(isinstance(a, str) and len(a) <= 1100 for a in argv):
         return refuse(400, "argv: request --kind K --target T --what W --why Y | check ID [--json] | use ID --kind K --target T"
                            " | rule merge TARGET | tell --kind merge --target TARGET --what W")
     try:
@@ -1138,7 +1413,24 @@ def api_answer(req):
         return {"status": 200, "body": {"exit": 1, "stdout": "", "stderr": f"approvals: {e}\n"}}
 
 
+def take_principal(argv):
+    """argv without `--principal <statement>` (a house's piece-call adds it: the runtime's word on whom the body acts
+    for), and the statement: the last one, if any."""
+    out, st, i = [], None, 0
+    while i < len(argv):
+        if argv[i] == "--principal" and i + 1 < len(argv):
+            st, i = argv[i + 1], i + 2
+            continue
+        if argv[i].startswith("--principal="):
+            st, i = argv[i].split("=", 1)[1], i + 1
+            continue
+        out.append(argv[i])
+        i += 1
+    return out, (st or None)
+
+
 def run(argv, caller=None):
+    argv, statement = take_principal(list(argv))
     ap = argparse.ArgumentParser(prog="approvals", add_help=False, exit_on_error=False)
     sub = ap.add_subparsers(dest="cmd")
     r = sub.add_parser("request", add_help=False, exit_on_error=False)
@@ -1147,6 +1439,7 @@ def run(argv, caller=None):
     r.add_argument("--if-yes", dest="if_yes", default="")
     r.add_argument("--if-no", dest="if_no", default="")
     r.add_argument("--as", dest="as_", default="")
+    r.add_argument("--on-behalf", dest="on_behalf", default="")
     c = sub.add_parser("check", add_help=False, exit_on_error=False)
     c.add_argument("id")
     c.add_argument("--json", action="store_true")
@@ -1156,6 +1449,7 @@ def run(argv, caller=None):
     u.add_argument("--kind", default="")
     u.add_argument("--target", default="")
     u.add_argument("--as", dest="as_", default="")
+    u.add_argument("--on-behalf", dest="on_behalf", default="")
     sub.add_parser("list", add_help=False, exit_on_error=False)
     ru = sub.add_parser("rule", add_help=False, exit_on_error=False)
     ru.add_argument("kind")
@@ -1169,11 +1463,14 @@ def run(argv, caller=None):
     for fl in ("--kind", "--target", "--by"):
         g.add_argument(fl, default="")
     g.add_argument("--for", dest="for_", default="")
+    g.add_argument("--person", default="")
     g.add_argument("--deny", action="store_true")
     try:
         a = ap.parse_args(argv)
     except (argparse.ArgumentError, SystemExit) as e:
         raise ValueError(f"usage: {e}") from None
+    if getattr(a, "on_behalf", "") and not a.as_:
+        raise PermissionError("--on-behalf is for a piece on loom's machine acting for a body (--as)")
     if a.cmd in ("request", "use", "check") and a.as_:
         # A piece on loom's machine acting for a body (the clock filing or spending a house's
         # approval) names it with --as; only a local call may say so.
@@ -1186,7 +1483,8 @@ def run(argv, caller=None):
     if a.cmd == "request":
         x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None,
                     acting_for=bool(a.as_), ask=a.ask or None, if_yes=a.if_yes or None, if_no=a.if_no or None,
-                    details=a.details or None, conversation=a.conversation or None)
+                    details=a.details or None, conversation=a.conversation or None, statement=statement,
+                    on_behalf=a.on_behalf or None)
         if x["state"] == "denied":
             return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
         if x["state"] == "allowed":
@@ -1198,14 +1496,16 @@ def run(argv, caller=None):
         return get(a.id)["state"] + "\n"
     if a.cmd == "use":
         # Over the API (a body) only with no wake kind; on loom's machine (the clock, with or without --as) any.
-        use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller)
+        use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller, statement=statement, on_behalf=a.on_behalf or None,
+            # Only the runtime's relay may leave whom unsaid (t-1953); any other kind a piece spends says it, or is held to unknown.
+            unstated=bool(a.as_) and not a.on_behalf and a.kind == "relay")
         return f"{a.id}: used\n"
     if a.cmd == "rule":
-        return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json)
+        return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement)
     if a.cmd == "tell":
         if a.kind not in RULE_KINDS or not repo_of(a.target):
             raise ValueError("tell --kind merge --target <forge>:<locator>#<n>@<head> --what \"…\"")
-        n = tell(caller, a.kind, a.target, a.what)
+        n = tell(caller, a.kind, a.target, a.what, statement=statement)
         return f"told the owner: {notice_of(n)['text']}\n"
     if a.cmd == "grant":
         # The owner's answer, from loom's machine only (the Changes piece's Yes and Not yet): never a body's.
@@ -1213,7 +1513,8 @@ def run(argv, caller=None):
             raise PermissionError("grant is the owner's, on loom's machine; a body asks with request")
         if a.by and not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", a.by):
             raise ValueError("--by is a household member's slug")
-        x = grant(a.kind, a.target, a.for_, a.by or None, a.deny)
+        # No --person: the owner's own work. --person owner is a person by that name, refused (never the owner).
+        x = grant(a.kind, a.target, a.for_, a.by or None, a.deny, person=OWNER if a.person == "" else (a.person if a.person != OWNER else " owner"))
         return f"{x['id']}: {x['state']}\n"
     if a.cmd == "list":
         if caller:
@@ -1273,7 +1574,10 @@ def main():
         conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
         if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.fullmatch(conv):
             args = [*args, "--conversation", conv]
-        forward("approvals", args)
+        # On whose behalf (t-1943): the runtime's statement, as piece-call adds it; a typed one is dropped.
+        args, typed = take_principal(args)
+        st = (fetch_statement(conv) if CONVERSATION.fullmatch(conv) and args else None) or typed
+        forward("approvals", args + (["--principal", st] if st else []))
     if args[:1] == ["ui"]:
         rest = [a for a in args[1:] if a != "--json"]
         if not rest:
@@ -1295,6 +1599,13 @@ def main():
     if not args or args[0] in ("-h", "--help"):
         print(__doc__.strip())
         return
+    conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
+    if CONVERSATION.fullmatch(conv) and "--as" not in args:
+        global LOCAL_BODY
+        LOCAL_BODY = True
+        args, _ = take_principal(args)
+        st = fetch_statement(conv)
+        args = args + (["--principal", st] if st else [])
     try:
         out = run(args)
         out, err = out if isinstance(out, tuple) else (out, "")

@@ -58,6 +58,62 @@ approvals list              the recent ones (the owner's view, on loom's machine
 Nothing here grants by itself: a body may be steered, so only the owner's
 Allow on the page makes an approval spendable.
 
+## On whose behalf
+
+The owner's ruling (2026-11-07): his standing rules and his yes cover work an
+agent does **for him**. When it acts for someone else (a person in Slack or
+Discord, a body they steer), those don't carry over: it needs a grant he set
+for that person, or it asks.
+
+- **The principal** is on whose behalf a call is: the owner, a person (their
+  slug), or someone loom can't name. It's the runtime's word, never the body's:
+  loom's runtime signs a statement of who the body's conversation acts for
+  (loom-box `loom runtime principal`), a house's `piece-call` adds it as
+  `--principal <statement>`, and the piece checks it with
+  `loom runtime principal --verify` (APPROVALS_PRINCIPAL), taking only an
+  answer with `ok: true` and exit 0. No statement, one that doesn't verify, or
+  one for another agent: someone loom can't name, **never the owner**. A
+  statement lasts 5 minutes and the runtime refuses one whose conversation has
+  heard someone new since; within that, it's a bearer's for that agent (the
+  runtime's README states the limit: one agent's bodies share a house). A
+  person whose slug is `owner` is that person, never the owner: unknown here. A body the runtime runs on loom's machine (a local wake)
+  fetches its own; any other call on loom's machine is the owner's
+  (APPROVALS_LOCAL_PRINCIPAL, `owner` or `unknown`).
+- **`rule merge`** reads the standing rules only for the owner's own work. For
+  a person, it reads the **grants** the owner set for them (most specific
+  wins, as for rules), and with none it asks. For someone loom can't name, it
+  asks.
+- **A card names whom it's for**, in the piece's words, first: "Merge
+  on-pond#220 for Loren?", or "For Loren: <the ask>" for any other kind. The
+  body's own question follows in the sheet.
+- **Several people** ("Merge on-pond#221 for Loren and Dan?") are someone loom
+  can't name, so no grant applies; the card is theirs, and it's spent only for
+  exactly those people.
+- **Spent only for them.** An approval asked for Loren is spent only by a body
+  acting for Loren (and the agent, the exact target, once, before it expires,
+  as before). Asking again is the same card only for the same person. The
+  owner's yes for himself isn't one for Loren, and the other way round. A deny
+  still wins over every yes for that exact target, whoever it was for.
+- **Grants are the owner's**, on the page's "Standing rules" section, in a
+  "Merging, for other people" panel beside his own: a person, a scope (a repo,
+  a pattern or a project) and a tier. A pending card for one person has
+  **Always for <person> on <repo>**, which sets that grant. Nothing in the
+  piece API sets one. The Changes piece's `grant` is the owner's own work
+  unless it says `--person` (and `--person owner` is refused: that's a person
+  by that name). Its `rule merge --for AGENT` is a call on loom's machine like
+  any other: the statement if there is one, else APPROVALS_LOCAL_PRINCIPAL, and
+  a local body is never the owner for saying `--for`.
+- **The clock** files and spends a wake approval for a body with `--as` and
+  `--on-behalf <whom the wake is for>`; only a local `--as` call may say that,
+  and it's held to it. **The runtime's relay** spends a relay approval with
+  `--as` and no `--on-behalf` (it has no conversation to ask about): then
+  everything is checked but whom it was for. That's for a relay only: any other
+  kind a piece files or spends without `--on-behalf` is someone loom can't name.
+  In a house, the bin itself (rarely run there: `piece-call` is) fetches its
+  statement with the house's `loom-runtime`, and keeps a supplied one if that
+  fails. A relay carries none of the
+  owner's authority to the agent it reaches.
+
 ## Standing rules
 
 Most merges don't need asking. A **standing rule** is the owner's lasting
@@ -72,7 +128,7 @@ answer for a scope (loom `docs/specs/changes.md`):
 ```
 approvals rule merge github:acme/app#12@<40-hex head>    do | tell | ask [pending|allowed|denied a-…]
 approvals tell --kind merge --target <same> --what "…"
-approvals grant --kind merge --target <same> --for AGENT --by MEMBER [--deny]   loom's machine only
+approvals grant --kind merge --target <same> --for AGENT --by MEMBER [--person SLUG] [--deny]   loom's machine only
 ```
 
 - **A scope** is a repo pattern (`github:acme/*`, `github:acme/app`; `*`
@@ -124,6 +180,8 @@ Unmanaged, any `loom-approvals` on `PATH` works too: clone the repo and link
 | `APPROVALS_KINDS` | none | Words for kinds the page should name, as JSON: `{"github-write": "A GitHub write"}`. `local-wake` and `relay` (the clock's) are built in; any other kind is shown as its own words |
 | `APPROVALS_SEED_RULES` | none | The standing rules to start with, as JSON: `[{"kind": "merge", "scope": "github:acme/*", "tier": "do"}]`. Written once, when there are no rules yet |
 | `APPROVALS_PROJECTS` | `loom project list --json` | The command that lists project cards, for `project:` rules |
+| `APPROVALS_PRINCIPAL` | `loom runtime principal` | The runtime's command for on whose behalf a body acts: `--verify` checks a statement, `--conversation cv` gets a local body's own |
+| `APPROVALS_LOCAL_PRINCIPAL` | `owner` | Who a call on loom's machine itself (not a body in a conversation) acts for: `owner` or `unknown` |
 
 A managed piece gets its settings from loom. Run directly by the bin loom
 linked (`$LOOM_HOME/pieces/bin/approvals`, a body typing `approvals`), it
