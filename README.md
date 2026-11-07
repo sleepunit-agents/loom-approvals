@@ -99,7 +99,10 @@ for that person, or it asks.
   a pattern or a project) and a tier. A pending card for one person has
   **Always for <person> on <repo>**, which sets that grant. Nothing in the
   piece API sets one. The Changes piece's `grant` is the owner's own work
-  unless it says `--person`.
+  unless it says `--person` (and `--person owner` is refused: that's a person
+  by that name). Its `rule merge --for AGENT` is a call on loom's machine like
+  any other: the statement if there is one, else APPROVALS_LOCAL_PRINCIPAL, and
+  a local body is never the owner for saying `--for`.
 - **The clock** files and spends a wake approval for a body with `--as` and
   `--on-behalf <whom the wake is for>`; only a local `--as` call may say that,
   and it's held to it. **The runtime's relay** spends a relay approval with

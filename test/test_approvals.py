@@ -6,7 +6,9 @@
 A body asks, the owner allows or denies on the page, and an allowed approval is
 spent once by exactly the action it names, by the body that asked.
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -1100,6 +1102,33 @@ class OnWhoseBehalf(unittest.TestCase):
         # And a piece filing without saying whom is someone loom can't name, never the owner.
         out = ap.run(["request", "--kind", "local-wake", "--target", "ada:abc", "--what", "w", "--why", "y", "--as", json.dumps(HOUSE)])
         self.assertEqual(ap.get(out.split(":")[0])["for"], ap.UNKNOWN)
+
+    def test_a_body_the_runtime_runs_on_loom_s_machine_is_its_conversation_s(self):
+        def main(*argv, statement=None, env=None):
+            out = io.StringIO()
+            with mock.patch.object(ap, "in_a_house", return_value=False), mock.patch.object(ap, "LOCAL_BODY", False), \
+                 mock.patch.object(ap, "fetch_statement", return_value=statement), \
+                 mock.patch.dict(ap.os.environ, {"LOOM_BODY_CONVERSATION": "", **(env or {})}), mock.patch.object(ap.sys, "argv", ["approvals", *argv]), \
+                 contextlib.redirect_stdout(out):
+                ap.main()
+            return out.getvalue()
+        agent = ap.LOCAL_AGENT
+        conv = {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}
+        self.assertEqual(main("rule", "merge", self.ON_POND), "do\n", "loom's machine itself: the owner's")
+        self.assertEqual(main("rule", "merge", self.ON_POND, env=conv), "ask\n", "a local body the runtime can't vouch for")
+        self.assertEqual(main("rule", "merge", self.ON_POND, env=conv, statement=f"S:{agent}:loren"), "ask\n")
+        self.assertEqual(main("rule", "merge", self.ON_POND, env=conv, statement=f"S:{agent}:owner"), "do\n")
+        # --for (the Changes piece's view) is a call here like any other: a local body isn't the owner by saying it.
+        self.assertEqual(main("rule", "merge", self.ON_POND, "--for", agent, env=conv), "ask\n")
+        with mock.patch.dict(os.environ, {"APPROVALS_LOCAL_PRINCIPAL": "unknown"}):
+            self.assertEqual(ap.run(["rule", "merge", self.ON_POND, "--for", "ada"])[0], "ask\n")
+        self.assertEqual(ap.run(["rule", "merge", self.ON_POND, "--for", "ada"])[0], "do\n")
+
+    def test_grant_person_owner_is_refused_and_no_person_is_the_owner_s(self):
+        with self.assertRaises(ValueError):
+            ap.run(["grant", "--kind", "merge", "--target", self.ON_POND, "--for", "ada", "--person", "owner"])
+        g = ap.run(["grant", "--kind", "merge", "--target", self.ON_POND, "--for", "ada"]).split(":")[0]
+        self.assertEqual(ap.get(g)["for"], ap.OWNER)
 
     def test_a_body_can_t_say_on_whose_behalf_over_the_api(self):
         r = self.api(["request", "--kind", "merge", "--target", self.ON_POND, "--what", "w", "--why", "y", "--on-behalf", "owner"], "loren")

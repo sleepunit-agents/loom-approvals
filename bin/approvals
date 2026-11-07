@@ -841,7 +841,9 @@ def rule_answer(caller, kind, targets, agent=None, as_json=False, statement=None
     if not 1 <= len(targets) <= 200:
         raise ValueError("rule merge TARGET [TARGET…], 200 at most")
     who = {"agent": agent} if agent else who_of(caller)
-    p = {"for": OWNER} if agent else principal_for_call(caller, who, statement)
+    # --for (loom's machine): the Changes piece's view, as any call here is: the statement if there is one, else
+    # APPROVALS_LOCAL_PRINCIPAL; a local body is never the owner for being here.
+    p = principal_for_call(caller, who, statement)
     res = rules_for(who["agent"], kind, targets, p["for"], p.get("people") or ())
     if as_json:
         return json.dumps(res) + "\n", ""
@@ -1511,7 +1513,8 @@ def run(argv, caller=None):
             raise PermissionError("grant is the owner's, on loom's machine; a body asks with request")
         if a.by and not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", a.by):
             raise ValueError("--by is a household member's slug")
-        x = grant(a.kind, a.target, a.for_, a.by or None, a.deny, person=a.person or OWNER)
+        # No --person: the owner's own work. --person owner is a person by that name, refused (never the owner).
+        x = grant(a.kind, a.target, a.for_, a.by or None, a.deny, person=OWNER if a.person == "" else (a.person if a.person != OWNER else " owner"))
         return f"{x['id']}: {x['state']}\n"
     if a.cmd == "list":
         if caller:
