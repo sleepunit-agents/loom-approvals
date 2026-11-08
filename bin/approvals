@@ -182,6 +182,16 @@ def grant_words(target):
     return f"Give {name_of(g['agent'])} access to {name_of(g['piece'])}{some}?"
 
 
+FINE_MAX = 400   # loom's cap on an ask's fine print (vocab.ts plainOf): past it the whole manifest is refused
+
+
+def grant_lines(a):
+    """A grant's "If you allow" and "If you deny", the piece's words from its target; {} for any other kind."""
+    if a.get("kind") != GRANT_KIND or not grant_of(a.get("target")):
+        return {}
+    return {"if_yes": grant_if_yes(a["target"]), "if_no": grant_if_no(a["target"])}
+
+
 def grant_if_yes(target):
     """What Allow does, in the piece's words, beside Allow on the card: never the body's."""
     g = grant_of(target)
@@ -1109,10 +1119,11 @@ def fine_print(a):
     """Exactly what Allow allows: the kind and target (machine fields), where it was asked from, for whom, for how long."""
     if a.get("kind") == GRANT_KIND and grant_of(a.get("target")):
         g = grant_of(a["target"])
-        what = "all of it" if "*" in g["paths"] else ", ".join(g["paths"])
-        return (f"{kind_of(a)}, {from_of(a)}. Allowing it gives {name_of(g['agent'])} {name_of(g['piece'])} ({what}) from now on, "
-                "added to whatever it has there already (nothing is taken away): the runtime applies it at once, as you, "
-                "and it stays until you change it on Permissions.")
+        # Short whatever the target (loom refuses a card's fine print past 400, and with it every card): the paths are
+        # the headline's, said once there.
+        return (f"Access to a piece, {from_of(a)}. Allowing it adds that to whatever {name_of(g['agent'])} has in "
+                f"{name_of(g['piece'])} already (nothing is taken away): the runtime applies it at once, as you, and it stays "
+                "until you change it on Permissions.")[:FINE_MAX]
     fw = for_words(a)
     named = a.get("people") or []
     everyone = f" ({', '.join(person_name(p) for p in named)})" if len(named) > 3 else ""
@@ -1135,7 +1146,7 @@ def ui_manifest():
         **({"why": a["why"], "if_yes": a["if_yes"], "if_no": a["if_no"]} if a.get("ask") else {}),
         # A grant's "If you allow" is the piece's, from its target: what Allow gives is never the body's to describe.
         # ...and it leads: wherever loom's Inbox absorbs it into the agent's Needs you, these words head it, not the agent's.
-        **({"if_yes": grant_if_yes(a["target"]), "if_no": grant_if_no(a["target"]), "lead": True} if a["kind"] == GRANT_KIND and grant_of(a["target"]) else {}),
+        **({**grant_lines(a), "lead": True} if grant_lines(a) else {}),
         **({"details": "\n\n".join(x for x in (ask_detail(a), a.get("details")) if x)} if ask_detail(a) or a.get("details") else {}),
         **({"for": for_of(a)} if for_of(a) != OWNER else {}),
         "fine": fine_print(a),
@@ -1277,8 +1288,9 @@ def ui_page(req):
                 {"type": "text", "text": headline(a)},
                 *([{"type": "text", "text": ask_detail(a)}] if ask_detail(a) else []),
                 {"type": "text", "text": a["why"]},
-                *([{"type": "kv", "items": [{"label": "If you allow", "value": a["if_yes"]}, {"label": "If you deny", "value": a["if_no"]}]}]
-                  if a.get("if_yes") else []),
+                *([{"type": "kv", "items": [{"label": "If you allow", "value": {**a, **grant_lines(a)}["if_yes"]},
+                                            {"label": "If you deny", "value": {**a, **grant_lines(a)}["if_no"]}]}]
+                  if a.get("if_yes") or grant_lines(a) else []),
                 {"type": "buttons", "items": answers_of(a, cards if owner else None)},
                 *([{"type": "text", "text": a["details"]}] if a.get("details") else []),
                 # A sheet is already folded detail: loom refuses a details block inside one, and with it the page.

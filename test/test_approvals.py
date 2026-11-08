@@ -1367,7 +1367,7 @@ class Grants(unittest.TestCase):
         self.assertIn("Can I have a cookie?", card["details"])
         self.assertEqual(card["actions"][0]["label"], "Allow")
         self.assertIs(card["lead"], True)
-        self.assertIn("from now on", card["fine"])
+        self.assertIn("it stays until you change it on Permissions", card["fine"])
         aid2 = self.ask(target="tasks:mark:run", ask="Give Mark access to filing tasks?")
         self.assertEqual(ap.headline(ap.get(aid2)), "Give Mark access to Tasks, for run?")
         # Beside Allow, the piece's words, never the body's.
@@ -1417,6 +1417,31 @@ class Grants(unittest.TestCase):
             "--if-yes", "y", "--if-no", "n"])}})
         self.assertIn("wasn't applied; ask the owner to give it on Permissions", r["body"]["stdout"])
         self.assertNotIn("approvals use", r["body"]["stdout"])
+
+    def test_the_longest_grant_target_still_fits_loom_s_caps(self):
+        # loom refuses a card's fine print past 400 and its text past 2000, and with them every card of the piece.
+        paths = ",".join(f"p{i:02d}/abcdefghijklm" for i in range(10))
+        target = f"{'t' * 40}:{'m' * 40}:{paths}"[:200]
+        target = target.rstrip(",/")
+        self.assertIsNotNone(ap.grant_of(target), target)
+        aid = self.ask(target=target, ask="Give the agent access to that piece?")
+        card = [a for a in ap.ui_manifest()["asks"] if a["actions"][0]["fields"]["id"] == aid][0]
+        self.assertLessEqual(len(card["fine"]), 400)
+        for k in ("text", "why", "if_yes", "if_no"):
+            self.assertLessEqual(len(card[k]), 300 if k != "text" else 2000, k)
+
+    def test_the_page_s_sheet_says_the_piece_s_words_beside_allow_too(self):
+        aid = self.ask()
+        page = ap.ui_page({"path": "", "caller": OWNER_CALLER})
+        sheet = json.dumps(page)
+        self.assertIn("Mark can use Tasks (all of it) from now on", sheet)
+        self.assertNotIn("Mark keeps asking me to file them.", sheet.split("Exactly what")[0].split("If you deny")[1][:200])
+
+    def test_the_runtime_s_exact_spend_works(self):
+        # loom-box's spendGrant: use ID --kind grant --target T --as {"kind": "agent", "agent": <who asked>}, nothing else.
+        aid = self.ask()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        self.assertEqual(ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps({"kind": "agent", "agent": "ada"})]), f"{aid}: used\n")
 
     def test_state_carries_a_grant_s_target_for_core(self):
         aid = self.ask()
