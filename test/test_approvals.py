@@ -1366,6 +1366,7 @@ class Grants(unittest.TestCase):
         self.assertEqual(card["text"], "Give Mark access to Tasks?")
         self.assertIn("Can I have a cookie?", card["details"])
         self.assertEqual(card["actions"][0]["label"], "Allow")
+        self.assertIs(card["lead"], True)
         self.assertIn("from now on", card["fine"])
         aid2 = self.ask(target="tasks:mark:run", ask="Give Mark access to filing tasks?")
         self.assertEqual(ap.headline(ap.get(aid2)), "Give Mark access to Tasks, for run?")

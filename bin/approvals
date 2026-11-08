@@ -1134,7 +1134,8 @@ def ui_manifest():
         # deny"); fine is the small print under "Exactly what this allows".
         **({"why": a["why"], "if_yes": a["if_yes"], "if_no": a["if_no"]} if a.get("ask") else {}),
         # A grant's "If you allow" is the piece's, from its target: what Allow gives is never the body's to describe.
-        **({"if_yes": grant_if_yes(a["target"]), "if_no": grant_if_no(a["target"])} if a["kind"] == GRANT_KIND and grant_of(a["target"]) else {}),
+        # ...and it leads: wherever loom's Inbox absorbs it into the agent's Needs you, these words head it, not the agent's.
+        **({"if_yes": grant_if_yes(a["target"]), "if_no": grant_if_no(a["target"]), "lead": True} if a["kind"] == GRANT_KIND and grant_of(a["target"]) else {}),
         **({"details": "\n\n".join(x for x in (ask_detail(a), a.get("details")) if x)} if ask_detail(a) or a.get("details") else {}),
         **({"for": for_of(a)} if for_of(a) != OWNER else {}),
         "fine": fine_print(a),
