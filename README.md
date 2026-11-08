@@ -10,7 +10,7 @@ The body then spends the approval on exactly the action it named, once.
 
 ```
 approvals request --kind KIND --target TARGET --ask "…" --why "…" --if-yes "…" --if-no "…" [--details "…"] [--minutes N]
-approvals check ID          pending | allowed | denied | used | expired
+approvals check ID          pending | allowed | denied | used | expired | withdrawn
 approvals use ID --kind KIND --target TARGET
 approvals list              the recent ones (the owner's view, on loom's machine)
 ```
@@ -152,6 +152,11 @@ piece's), answered only by the household owner, and spent only by that piece, in
 - **Only the household owner answers** (a member who owns some agents is refused, Allow and Deny). Right after his
   Allow, loom core reads the approval back (`state` carries the target) and posts it to the piece that applies it as
   him. Deny records no, and nothing changes.
+- **Never asked twice.** A request naming a wake (or conversation) the owner said no to is refused ("not asked
+  again"), and so is one overlapping a card still waiting (withdraw that one first). Both are filed and spent
+  `--on-behalf owner`, and spent only with it; a body the runtime runs on loom's machine can't spend one.
+- **At most 12 wakes per card**, each listed with its id, when it fires and what it's for (a card that leaves an id
+  out of `--details` is refused); a clock with more files the first 12 and the rest once that's answered.
 - **`withdraw ID --as <agent>`**: the filing piece takes back its own pending card, unanswered (the clock refreshing
   its one card with an up-to-date list). Only a kind a piece files, only while pending; never over the API. It shows
   under Answered as "Withdrawn unanswered".
@@ -219,7 +224,7 @@ Unmanaged, any `loom-approvals` on `PATH` works too: clone the repo and link
 |---|---|---|
 | `APPROVALS_DIR` | `${LOOM_PIECE_HOME}/data` | Where the store lives: `approvals.json` (0600) and `audit.jsonl`. Unmanaged, without `LOOM_PIECE_HOME`: `~/.local/state/loom-approvals` |
 | `APPROVALS_LOCAL_AGENT` | `agent` | The agent a request made on loom's machine itself (not from a house) is filed as |
-| `APPROVALS_KINDS` | none | Words for kinds the page should name, as JSON: `{"github-write": "A GitHub write"}`. `local-wake` and `relay` (the clock's) are built in; any other kind is shown as its own words |
+| `APPROVALS_KINDS` | none | Words for kinds the page should name, as JSON: `{"github-write": "A GitHub write"}`. `local-wake`, `relay`, `merge`, `grant`, `vouch-wake` and `principal-reset` are built in; any other kind is shown as its own words |
 | `APPROVALS_SEED_RULES` | none | The standing rules to start with, as JSON: `[{"kind": "merge", "scope": "github:acme/*", "tier": "do"}]`. Written once, when there are no rules yet |
 | `APPROVALS_PROJECTS` | `loom project list --json` | The command that lists project cards, for `project:` rules |
 | `APPROVALS_PRINCIPAL` | `loom runtime principal` | The runtime's command for on whose behalf a body acts: `--verify` checks a statement, `--conversation cv` gets a local body's own |

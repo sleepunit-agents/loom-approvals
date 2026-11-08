@@ -170,6 +170,8 @@ GRANT_NAME = r"[a-z][a-z0-9-]{0,39}"
 #                    principal --reset`): what it heard before is set aside, and its session dropped.
 VOUCH_KIND = "vouch-wake"
 RESET_KIND = "principal-reset"
+# At most 12 wakes on one card: each listed with its id, when it fires and what it's for, all within DETAILS_MAX (1000)
+# and a read the owner takes in at a glance. A clock with more files the first 12 and the rest once that's answered.
 VOUCH_MAX = 12
 VOUCH_TARGET = re.compile(rf"({GRANT_NAME}):(w-[0-9a-f]{{6}}(?:,w-[0-9a-f]{{6}}){{0,{VOUCH_MAX - 1}}})")
 RESET_TARGET = re.compile(rf"({GRANT_NAME}):(cv-[0-9a-f]{{12}})")
@@ -563,6 +565,9 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
     if kind in (VOUCH_KIND, RESET_KIND) and (vouch_of(target) or reset_of(target))["agent"] != who["agent"]:
         # Filed for the agent whose wakes or conversation it names: its owner reads whose they are from the card.
         raise PermissionError(f"a {kind} approval names the agent it's filed for ({who['agent']})")
+    if kind in (VOUCH_KIND, RESET_KIND) and p["for"] != OWNER:
+        # The owner's own decision about whose work this is: filed (and spent) on his behalf, so the card's words are true.
+        raise ValueError(f"a {kind} approval is filed --on-behalf owner")
     if kind in (VOUCH_KIND, RESET_KIND):
         # The owner reads exactly what his Allow does: each wake (its note and when it fires) or the conversation (its
         # label), resolved by the piece that files it. A card without them, or one that leaves a wake out, is refused.
@@ -600,6 +605,20 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
                          "and why: the owner reads them to decide")
     mins = DEFAULT_MIN if not minutes else max(1, min(int(minutes), MAX_MIN))
     with Store() as s:
+        if kind in (VOUCH_KIND, RESET_KIND):
+            # Never asked again after a No, and never two cards waiting for the same wake or conversation: this store is
+            # the durable record of his answer, whatever the filing piece remembers (t-1975).
+            mine = set(vouch_of(target)["ids"]) if kind == VOUCH_KIND else {reset_of(target)["conversation"]}
+            for a in s.d["approvals"].values():
+                if a["kind"] != kind or a["who"].get("agent") != who["agent"] or a["target"] == target and state_of(a) == "pending":
+                    continue
+                theirs = set(vouch_of(a["target"])["ids"]) if kind == VOUCH_KIND and vouch_of(a["target"]) else \
+                    ({reset_of(a["target"])["conversation"]} if kind == RESET_KIND and reset_of(a["target"]) else set())
+                both = sorted(mine & theirs)
+                if both and a["state"] == "denied":
+                    raise PermissionError(f"the owner said no for {' '.join(both)} already ({a['id']}): not asked again")
+                if both and state_of(a) == "pending":
+                    raise PermissionError(f"{a['id']} already asks about {' '.join(both)}: withdraw it first (withdraw {a['id']})")
         # Asking again for the same thing is the same card, from any of the agent's bodies (use's rule): a parked body's
         # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
@@ -1123,7 +1142,8 @@ def tell(caller, kind, target, what, statement=None):
 
 # ---------------------------------------------------------------- loom's page
 
-OUTCOME = {"allowed": "Allowed, not used yet.", "used": "Allowed, and used.", "denied": "Denied.", "expired": "Allowed, but it expired unused."}
+OUTCOME = {"allowed": "Allowed, not used yet.", "used": "Allowed, and used.", "denied": "Denied.", "expired": "Allowed, but it expired unused.",
+           "withdrawn": "Withdrawn unanswered: asked again with an up-to-date list."}
 
 # The page says what an approval is for in plain words, not ids.
 STATE_WORDS = {"pending": "Waiting on you", "allowed": "Allowed", "used": "Used", "denied": "Denied", "expired": "Expired",
@@ -1358,7 +1378,7 @@ def outcome_of(a):
 
 def past_meta(a):
     """What it would have done, how it went, when, and why: wrapped on the page, nothing cut."""
-    when = ago(a.get("used") or a.get("decided") or a["at"])
+    when = ago(a.get("used") or a.get("decided") or a.get("withdrawn") or a["at"])
     return " · ".join(x for x in (what_of(a), f"{outcome_of(a)} {when}".strip(), f"“{a['why']}”") if x)
 
 
@@ -1555,8 +1575,8 @@ def ui_act(req):
         if k in OWNER_APPLIED and not is_owner(req):
             # The household's pieces are its owner's to give (t-1970), and whose work a wake or a conversation is, his to
             # say (t-1975): an agent's owner answers its other asks, not these.
-            return {"ok": False, "message": ("Access to a piece is" if k == GRANT_KIND else "Whose work it is, is")
-                    + " the household owner's to give or refuse.", "page": ""}
+            return {"ok": False, "message": "Access to a piece is the household owner's to give or refuse." if k == GRANT_KIND
+                    else "Only the household owner says whose work this is.", "page": ""}
         a = answer(aid, action, caller_who(req))
     except (LookupError, PermissionError) as e:
         return {"ok": False, "message": str(e), "page": ""}
@@ -1674,6 +1694,10 @@ def run(argv, caller=None):
         raise ValueError(f"usage: {e}") from None
     if getattr(a, "on_behalf", "") and not a.as_:
         raise PermissionError("--on-behalf is for a piece on loom's machine acting for a body (--as)")
+    if a.cmd == "use" and a.kind in OWNER_APPLIED and (os.environ.get("LOOM_BODY_CONVERSATION") or os.environ.get("LOOM_BODY_KEY")):
+        # Spent only by the piece that applies it, never from a body the runtime runs on loom's machine (it could say
+        # --as). Loom's machine is still the trust boundary (its bodies have the host's escapes): this is the plain door shut.
+        raise PermissionError(f"a {a.kind} approval is spent by the piece that applies it, not from a body")
     if a.cmd == "withdraw":
         # A piece on loom's machine only, for the body it filed for: never a body over the API.
         if caller or not a.as_:
@@ -1713,7 +1737,7 @@ def run(argv, caller=None):
         use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller, statement=statement, on_behalf=a.on_behalf or None,
             # Only the runtime may leave whom unsaid (t-1953): its relay, and a grant it applies (the owner's own decision
             # about an agent, whoever the body asked for); any other kind a piece spends says it, or is held to unknown.
-            unstated=bool(a.as_) and not a.on_behalf and a.kind in ("relay", *OWNER_APPLIED))
+            unstated=bool(a.as_) and not a.on_behalf and a.kind in ("relay", GRANT_KIND))
         return f"{a.id}: used\n"
     if a.cmd == "rule":
         return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement)

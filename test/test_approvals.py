@@ -1516,7 +1516,8 @@ class OwnerApplied(unittest.TestCase):
 
     def test_only_the_household_owner_answers(self):
         aid = self.file()
-        for caller in (MEMBER_CALLER, None, {"kind": "agent", "agent": "art"}):
+        # Loren owns art here: an agent's own owner still can't answer one (the household owner's alone).
+        for caller in ({"kind": "owner", "who": "loren", "agents": ["art"]}, MEMBER_CALLER, None, {"kind": "agent", "agent": "art"}):
             for act in ("allow", "deny"):
                 r = ap.ui_act({"action": act, "fields": {"id": aid}, **({"caller": caller} if caller else {})})
                 self.assertFalse(r["ok"], (caller, act))
@@ -1590,6 +1591,44 @@ class OwnerApplied(unittest.TestCase):
         for t in ("ada:w-0f0cfb", "art:w-0F0CFB", "art:w-0f0cfb,*"):
             with self.assertRaises((ValueError, PermissionError)):
                 self.file(target=t, details=f"- x ({t}): fires 10:00")
+
+    def test_never_asked_again_after_a_no_and_never_two_waiting(self):
+        aid = self.file()
+        # Overlapping a card still waiting: refused (the piece withdraws that one first).
+        with self.assertRaises(PermissionError):
+            self.file(target="art:w-0f0cfb,w-840b4e", details="- w-0f0cfb, w-840b4e: fires 10:00")
+        self.assertEqual(self.file(), aid, "the same card again is the same card")
+        ap.ui_act({"action": "deny", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        for t in ("art:w-0f0cfb,w-3c68fa,w-55e1c0", "art:w-3c68fa", "art:w-3c68fa,w-840b4e"):
+            with self.assertRaises(PermissionError) as e:
+                self.file(target=t, details=f"- {t.split(':')[1]}: fires 10:00")
+            self.assertIn("not asked again", str(e.exception))
+        self.assertTrue(self.file(target="art:w-840b4e", details="- w-840b4e: fires 10:00").startswith("a-"))
+        r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="Slack, #general")
+        ap.ui_act({"action": "deny", "fields": {"id": r}, "caller": OWNER_CALLER})
+        with self.assertRaises(PermissionError):
+            self.file(kind="principal-reset", target="art:cv-0123456789ab", details="Slack, #general")
+
+    def test_filed_and_spent_on_the_owner_s_behalf_only_never_from_a_body(self):
+        with self.assertRaises(ValueError):
+            ap.run(["request", "--kind", "vouch-wake", "--target", "art:w-0f0cfb", "--ask", "Count it?", "--why", "w",
+                    "--if-yes", "y", "--if-no", "n", "--details", "- w-0f0cfb", "--as", self.AS])
+        aid = self.file()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        t = "art:w-0f0cfb,w-3c68fa,w-55e1c0"
+        with self.assertRaises(PermissionError):    # no --on-behalf: whom it's for is said, never left unsaid
+            ap.run(["use", aid, "--kind", "vouch-wake", "--target", t, "--as", self.AS])
+        with mock.patch.dict(os.environ, {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}):
+            with self.assertRaises(PermissionError):
+                ap.run(["use", aid, "--kind", "vouch-wake", "--target", t, "--as", self.AS, "--on-behalf", "owner"])
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+
+    def test_a_withdrawn_card_shows_under_answered_in_loom_s_inbox(self):
+        aid = self.file()
+        ap.run(["withdraw", aid, "--as", self.AS])
+        done = [x for x in ap.ui_manifest()["answered"] if x["outcome"].startswith("Withdrawn")]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0]["text"], "Count these 3 scheduled jobs as your work?")
 
 
 if __name__ == "__main__":
