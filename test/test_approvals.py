@@ -1368,7 +1368,10 @@ class Grants(unittest.TestCase):
         self.assertEqual(card["actions"][0]["label"], "Allow")
         self.assertIn("from now on", card["fine"])
         aid2 = self.ask(target="tasks:mark:run", ask="Give Mark access to filing tasks?")
-        self.assertEqual(ap.headline(ap.get(aid2)), "Give Mark access to Tasks (only run)?")
+        self.assertEqual(ap.headline(ap.get(aid2)), "Give Mark access to Tasks, for run?")
+        # Beside Allow, the piece's words, never the body's.
+        self.assertEqual(card["if_yes"], "Mark can use Tasks (all of it) from now on, added to whatever else it has.")
+        self.assertIn("nothing is taken away", card["fine"])
 
     def test_only_the_household_owner_answers_a_grant(self):
         aid = self.ask()
