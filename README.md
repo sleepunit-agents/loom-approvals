@@ -114,6 +114,27 @@ for that person, or it asks.
   fails. A relay carries none of the
   owner's authority to the agent it reaches.
 
+## Access to a piece
+
+A body that needs an agent to have one of loom's pieces (Mark asking for Tasks) doesn't ask the owner to go and do
+it: it asks for a `grant`, and the owner's Allow does it (t-1970).
+
+```
+approvals request --kind grant --target tasks:mark --ask "Give Mark access to Tasks?" --why "…" --if-yes "…" --if-no "…"
+```
+
+- **The target** is `<piece>:<agent>`, or `<piece>:<agent>:<path>,<path>` for only those paths (a path, or a prefix
+  ending in `/*`, as the runtime's grants take them).
+- **The card's headline is the piece's**, from the target ("Give Mark access to Tasks?"), whatever the body wrote;
+  its own words are the detail under it. Its Allow says **Allow**, not Allow once: a grant lasts.
+- **Only the household owner answers it** (a member who owns some agents is refused, Allow and Deny).
+- **Allow applies it.** loom core, right after the owner's Allow, has the grants authority (the runtime) spend it and
+  apply it as the owner: the same as `loom runtime grants set`, adding that agent and keeping everyone else. Deny
+  records no, and nothing changes.
+- **Only the runtime spends it**, on loom's machine (`use --as` the agent that asked); a body's `use` is refused, so
+  it can't spend the owner's yes without the grant being applied.
+- `state` (core's read) carries a grant's target, so core can hand it to the runtime.
+
 ## Standing rules
 
 Most merges don't need asking. A **standing rule** is the owner's lasting

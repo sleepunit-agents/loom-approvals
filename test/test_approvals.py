@@ -1327,5 +1327,127 @@ class Projects(unittest.TestCase):
         self.assertIsNone(self.run_with("/no/such/command"))
 
 
+OWNER_CALLER = {"kind": "owner", "who": "jonathan-barket", "agents": "*"}
+MEMBER_CALLER = {"kind": "owner", "who": "loren", "agents": ["ada"]}
+
+
+class Grants(unittest.TestCase):
+    """Access to a piece (t-1970): a body asks, only the household owner answers, and only the runtime spends it."""
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(ap, "STATE", Path(self.td.name))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.td.cleanup()
+
+    def ask(self, target="tasks:mark", ask="Give Mark access to Tasks so he can file his own work?"):
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned([
+            "request", "--kind", "grant", "--target", target, "--ask", ask, "--why", "Mark asked to keep his own work list.",
+            "--if-yes", "Mark can use Tasks from now on.", "--if-no", "Mark keeps asking me to file them."])}})
+        self.assertEqual(r["body"]["exit"], 0, r)
+        return r["body"]["stdout"].split(":")[0]
+
+    def test_a_grant_target_is_piece_agent_and_optional_paths(self):
+        self.assertEqual(ap.grant_of("tasks:mark"), {"piece": "tasks", "agent": "mark", "paths": ["*"]})
+        self.assertEqual(ap.grant_of("tasks:mark:run,people/*"), {"piece": "tasks", "agent": "mark", "paths": ["run", "people/*"]})
+        for bad in ("tasks", "Tasks:mark", "tasks:mark:", "tasks:mark:../x", "tasks:mark:a b", "tasks:*", "*:mark", "tasks:mark:a/../b"):
+            self.assertIsNone(ap.grant_of(bad), bad)
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned(["request", "--kind", "grant", "--target", "tasks",
+                           "--what", "w", "--why", "y"])}})
+        self.assertEqual(r["body"]["exit"], 1)
+        self.assertIn("grant target", r["body"]["stderr"])
+
+    def test_the_card_says_what_allow_gives_in_the_piece_s_words(self):
+        aid = self.ask(ask="Can I have a cookie?")
+        card = [a for a in ap.ui_manifest()["asks"] if a["actions"][0]["fields"]["id"] == aid][0]
+        # The headline is the target's, whatever the body wrote: its own words are the detail under it.
+        self.assertEqual(card["text"], "Give Mark access to Tasks?")
+        self.assertIn("Can I have a cookie?", card["details"])
+        self.assertEqual(card["actions"][0]["label"], "Allow")
+        self.assertIs(card["lead"], True)
+        self.assertIn("it stays until you change it on Permissions", card["fine"])
+        aid2 = self.ask(target="tasks:mark:run", ask="Give Mark access to filing tasks?")
+        self.assertEqual(ap.headline(ap.get(aid2)), "Give Mark access to Tasks, for run?")
+        # Beside Allow, the piece's words, never the body's.
+        self.assertEqual(card["if_yes"], "Mark can use Tasks (all of it) from now on, added to whatever else it has.")
+        self.assertIn("nothing is taken away", card["fine"])
+        self.assertEqual(card["if_no"], "Nothing changes: Mark can't use any more of Tasks than it can now.")
+
+    def test_only_the_household_owner_answers_a_grant(self):
+        aid = self.ask()
+        for caller in (MEMBER_CALLER, None, {"kind": "agent", "agent": "ada"}):
+            r = ap.ui_act({"action": "allow", "fields": {"id": aid}, **({"caller": caller} if caller else {})})
+            self.assertFalse(r["ok"], caller)
+            self.assertIn("household owner", r["message"])
+            self.assertFalse(ap.ui_act({"action": "deny", "fields": {"id": aid}, **({"caller": caller} if caller else {})})["ok"])
+        self.assertEqual(ap.get(aid)["state"], "pending")
+        r = ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["message"], "Allowed: Give Mark access to Tasks.")
+        self.assertEqual(ap.get(aid)["by"], "jonathan-barket")
+
+    def test_a_deny_is_recorded_and_nothing_can_spend_it(self):
+        aid = self.ask()
+        self.assertTrue(ap.ui_act({"action": "deny", "fields": {"id": aid}, "caller": OWNER_CALLER})["ok"])
+        self.assertEqual(ap.get(aid)["state"], "denied")
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps(HOUSE)])
+
+    def test_only_the_runtime_spends_it_never_the_body(self):
+        aid = self.ask()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned(["use", aid, "--kind", "grant", "--target", "tasks:mark"])}})
+        self.assertEqual(r["body"]["exit"], 1)
+        self.assertIn("not by a body", r["body"]["stderr"])
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        # The runtime, on loom's machine, for the agent that asked: for exactly that target, once, whomever it was for.
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "grant", "--target", "secrets:mark", "--as", json.dumps(HOUSE)])
+        self.assertEqual(ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps(HOUSE)]), f"{aid}: used\n")
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps(HOUSE)])
+
+    def test_asking_again_for_one_allowed_but_not_applied_never_says_use_it(self):
+        aid = self.ask()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned([
+            "request", "--kind", "grant", "--target", "tasks:mark", "--ask", "Give Mark access to Tasks?", "--why", "w",
+            "--if-yes", "y", "--if-no", "n"])}})
+        self.assertIn("wasn't applied; ask the owner to give it on Permissions", r["body"]["stdout"])
+        self.assertNotIn("approvals use", r["body"]["stdout"])
+
+    def test_the_longest_grant_target_still_fits_loom_s_caps(self):
+        # loom refuses a card's fine print past 400 and its text past 2000, and with them every card of the piece.
+        paths = ",".join(f"p{i:02d}/abcdefghijklm" for i in range(10))
+        target = f"{'t' * 40}:{'m' * 40}:{paths}"[:200]
+        target = target.rstrip(",/")
+        self.assertIsNotNone(ap.grant_of(target), target)
+        aid = self.ask(target=target, ask="Give the agent access to that piece?")
+        card = [a for a in ap.ui_manifest()["asks"] if a["actions"][0]["fields"]["id"] == aid][0]
+        self.assertLessEqual(len(card["fine"]), 400)
+        for k in ("text", "why", "if_yes", "if_no"):
+            self.assertLessEqual(len(card[k]), 300 if k != "text" else 2000, k)
+
+    def test_the_page_s_sheet_says_the_piece_s_words_beside_allow_too(self):
+        aid = self.ask()
+        page = ap.ui_page({"path": "", "caller": OWNER_CALLER})
+        sheet = json.dumps(page)
+        self.assertIn("Mark can use Tasks (all of it) from now on", sheet)
+        self.assertNotIn("Mark keeps asking me to file them.", sheet.split("Exactly what")[0].split("If you deny")[1][:200])
+
+    def test_the_runtime_s_exact_spend_works(self):
+        # loom-box's spendGrant: use ID --kind grant --target T --as {"kind": "agent", "agent": <who asked>}, nothing else.
+        aid = self.ask()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        self.assertEqual(ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps({"kind": "agent", "agent": "ada"})]), f"{aid}: used\n")
+
+    def test_state_carries_a_grant_s_target_for_core(self):
+        aid = self.ask()
+        r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})
+        self.assertEqual(r["body"]["approvals"][aid], {"state": "pending", "agent": "ada", "kind": "grant", "target": "tasks:mark"})
+
+
 if __name__ == "__main__":
     unittest.main()
