@@ -1631,12 +1631,23 @@ class OwnerApplied(unittest.TestCase):
 
     def test_a_no_overrules_an_earlier_unspent_yes_covering_the_same_wake(self):
         a1 = self.file(target="art:w-000001,w-000002", details="- w-000001, w-000002")
+        a2 = self.file(target="art:w-000003", details="- w-000003")
         ap.ui_act({"action": "allow", "fields": {"id": a1}, "caller": OWNER_CALLER})
-        a2 = self.file(target="art:w-000002,w-000003", details="- w-000002, w-000003")
-        ap.ui_act({"action": "deny", "fields": {"id": a2}, "caller": OWNER_CALLER})
-        self.assertEqual(ap.get(a1)["state"], "denied")
+        # Overlapping a yes not applied yet: refused (apply it first), so a No can't land on part of a yes.
         with self.assertRaises(PermissionError):
+            self.file(target="art:w-000002,w-000004", details="- w-000002, w-000004")
+        ap.run(["withdraw", a2, "--as", self.AS])
+        # Filed before the yes and answered No after it (both waiting at once can't happen for one wake, so by hand):
+        b = {**ap.get(a1), "id": "a-0000dead", "target": "art:w-000002,w-000009", "state": "denied", "decided": "2999-01-01T00:00:00Z"}
+        with ap.Store() as st:
+            st.d["approvals"][b["id"]] = b
+            st.save()
+        with self.assertRaises(PermissionError) as e:
             ap.run(["use", a1, "--kind", "vouch-wake", "--target", "art:w-000001,w-000002", "--as", self.AS, "--on-behalf", "owner"])
+        self.assertIn("overruled", str(e.exception))
+        # A No changes no other card: a1 is still allowed, and w-000003 (asked, then withdrawn) can be asked again.
+        self.assertEqual(ap.get(a1)["state"], "allowed")
+        self.assertTrue(self.file(target="art:w-000003", details="- w-000003").startswith("a-"))
 
     def test_a_no_outlives_the_store_s_trim(self):
         aid = self.file(target="art:w-00000a", details="- w-00000a")

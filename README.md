@@ -154,7 +154,11 @@ piece's), answered only by the household owner, and spent only by that piece, in
   him. Deny records no, and nothing changes.
 - **Never asked twice.** A request naming a wake (or conversation) the owner said no to is refused ("not asked
   again"), and so is one overlapping a card still waiting (withdraw that one first). Both are filed and spent
-  `--on-behalf owner`, and spent only with it; a body the runtime runs on loom's machine can't spend one.
+  `--on-behalf owner`, and spent only with it. A body in a house or over the API can't spend one; a body the runtime
+  runs on loom's machine is refused while its environment is as the runtime set it (`LOOM_BODY_CONVERSATION`,
+  `LOOM_BODY_KEY`). Past that, loom's machine is the trust boundary, as for every piece: its bodies share the owner's
+  account. A newer No for anything a card covers overrules that card's unspent yes; a card overlapping an allowed one
+  that isn't applied yet is refused.
 - **At most 12 wakes per card**, each listed with its id, when it fires and what it's for (a card that leaves an id
   out of `--details` is refused); a clock with more files the first 12 and the rest once that's answered.
 - **`withdraw ID --as <agent>`**: the filing piece takes back its own pending card, unanswered (the clock refreshing

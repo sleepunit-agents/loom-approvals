@@ -619,6 +619,8 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
                     raise PermissionError(f"the owner said no for {' '.join(both)} already ({a['id']}): not asked again")
                 if both and state_of(a) == "pending":
                     raise PermissionError(f"{a['id']} already asks about {' '.join(both)}: withdraw it first (withdraw {a['id']})")
+                if both and state_of(a) == "allowed":
+                    raise PermissionError(f"the owner allowed {a['id']} for {' '.join(both)}: apply it (it's spent by the piece) before asking again")
         # Asking again for the same thing is the same card, from any of the agent's bodies (use's rule): a parked body's
         # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
@@ -703,6 +705,14 @@ def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=N
         if not unstated and not same_principal(a, p):
             s.log("refused-use", a, for_used=p["for"])
             raise PermissionError(f"{aid} was asked for {for_words(a) or 'the owner'}; this body acts for {principal_words(p)}")
+        if kind in (VOUCH_KIND, RESET_KIND):
+            # A newer No for any wake (or the conversation) it covers overrules it: nothing he said no to is applied.
+            no = [b for b in s.d["approvals"].values() if b["id"] != aid and b["kind"] == kind and b["state"] == "denied"
+                  and b["who"].get("agent") == a["who"].get("agent") and b.get("decided", "") > a.get("decided", "")
+                  and covered(b) & covered(a)]
+            if no:
+                s.log("refused-use", a, denied_by=no[0]["id"])
+                raise PermissionError(f"{aid} was overruled: the owner said no to some of it after ({no[0]['id']})")
         last = newest_decision(s.d["approvals"].values(), kind, target, a["who"].get("agent"))
         if last and last["id"] != aid and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
             s.log("refused-use", a, denied_by=last["id"])
@@ -749,18 +759,6 @@ def answer(aid, action, by=None, minutes=None):
             a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + (minutes or a["minutes"]) * 60, timezone.utc))
         else:
             deny_siblings(s, a["kind"], a["target"], a["who"].get("agent"), a["id"], by)
-            if a["kind"] in (VOUCH_KIND, RESET_KIND):
-                # A No for a wake (or a conversation) overrules any earlier yes still unspent that covers it, whatever
-                # else that card listed: nothing he said no to is applied.
-                mine = covered(a)
-                for b in s.d["approvals"].values():
-                    if b["id"] != a["id"] and b["kind"] == a["kind"] and b["who"].get("agent") == a["who"].get("agent") \
-                            and state_of(b) in ("pending", "allowed") and covered(b) & mine:
-                        b["state"], b["decided"], b["superseded_by"] = "denied", iso(t), a["id"]
-                        b.pop("expires", None)
-                        if by:
-                            b["by"] = by
-                        s.log("deny-superseded", b, by_deny=a["id"])
         s.save()
         s.log(action, a)
         return a
@@ -1717,8 +1715,11 @@ def run(argv, caller=None):
     if getattr(a, "on_behalf", "") and not a.as_:
         raise PermissionError("--on-behalf is for a piece on loom's machine acting for a body (--as)")
     if a.cmd == "use" and a.kind in OWNER_APPLIED and (os.environ.get("LOOM_BODY_CONVERSATION") or os.environ.get("LOOM_BODY_KEY")):
-        # Spent only by the piece that applies it, never from a body the runtime runs on loom's machine (it could say
-        # --as). Loom's machine is still the trust boundary (its bodies have the host's escapes): this is the plain door shut.
+        # Spent only by the piece that applies it, never from a body the runtime runs on loom's machine as the runtime
+        # starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's environment). A
+        # body that unsets them is past what any piece here can check: loom's machine is the trust boundary (its bodies
+        # share the owner's account and have the host's own escapes; in_a_house, below). Houses and the API are refused
+        # outright (--as only from loom's machine).
         raise PermissionError(f"a {a.kind} approval is spent by the piece that applies it, not from a body")
     if a.cmd == "withdraw":
         # A piece on loom's machine only, for the body it filed for: never a body over the API.
