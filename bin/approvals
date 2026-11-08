@@ -576,8 +576,11 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         d = str(details or "")
         if not d.strip() or not ask:
             raise ValueError(f"a {kind} card lists what it covers (--details, with --ask): each wake, or the conversation")
-        if kind == VOUCH_KIND and not all(i in d for i in vouch_of(target)["ids"]):
-            raise ValueError("a vouch-wake card's --details lists every wake on it, by id")
+        lines = d.splitlines()
+        if kind == VOUCH_KIND and not all(any(i in ln and "fires" in ln for ln in lines) for i in vouch_of(target)["ids"]):
+            raise ValueError("a vouch-wake card's --details lists every wake on it: a line each, with its id and when it fires")
+        if kind == RESET_KIND and reset_of(target)["conversation"] not in d:
+            raise ValueError("a principal-reset card's --details names the conversation: its label and its id")
     # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
     # are refused, never cut, so nothing can hide past the part the owner reads.
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
@@ -612,7 +615,8 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
             # the durable record of his answer, whatever the filing piece remembers (t-1975).
             mine = covered({"kind": kind, "target": target})
             for a in s.d["approvals"].values():
-                if a["kind"] != kind or a["who"].get("agent") != who["agent"] or a["target"] == target and state_of(a) == "pending":
+                if a["kind"] != kind or a["who"].get("agent") != who["agent"] or a["target"] == target and state_of(a) in ("pending", "allowed"):
+                    # The same card again (waiting, or allowed and not yet applied): answered below, as any kind's is.
                     continue
                 both = sorted(mine & covered(a))
                 if both and a["state"] == "denied":

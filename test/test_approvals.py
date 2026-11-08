@@ -1463,7 +1463,10 @@ class OwnerApplied(unittest.TestCase):
         self.p.stop()
         self.td.cleanup()
 
-    def file(self, kind="vouch-wake", target="art:w-0f0cfb,w-3c68fa,w-55e1c0", details="- t-40 confirm first backup run (w-0f0cfb, w-3c68fa, w-55e1c0): fires today at 10:00"):
+    def file(self, kind="vouch-wake", target="art:w-0f0cfb,w-3c68fa,w-55e1c0",
+             details="- w-0f0cfb, fires 10:00: t-40 confirm first backup run\n- w-3c68fa, fires 10:00\n- w-55e1c0, fires 10:00"):
+        if kind == "principal-reset" and details.startswith("- w-"):
+            details = f"The conversation: Slack, #general ({target.split(':')[1]})"
         out = ap.run(["request", "--kind", kind, "--target", target, "--ask", "Count these scheduled jobs as your work?",
                       "--why", "They were set before loom could say whom each was for.", "--if-yes", "y", "--if-no", "n",
                       "--details", details, "--as", self.AS, "--on-behalf", "owner"])
@@ -1509,7 +1512,7 @@ class OwnerApplied(unittest.TestCase):
         self.assertTrue(c["fine"].endswith("as you."), "never cut")
         one = self.file(target="art:w-840b4e", details="- Check the backup (w-840b4e): fires 10:00 AM")
         self.assertEqual(self.card(one)["text"], "Count this scheduled job as your work?")
-        r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="The conversation: Slack, #general")
+        r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="The conversation: Slack, #general (cv-0123456789ab)")
         self.assertEqual(self.card(r)["text"], "Count this conversation as your work from now on?")
         self.assertIn("cv-0123456789ab", self.card(r)["fine"])
 
@@ -1583,7 +1586,11 @@ class OwnerApplied(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.file(details="")
         with self.assertRaises(ValueError):
-            self.file(details="- t-40 confirm (w-0f0cfb, w-3c68fa): fires 10:00")   # w-55e1c0 left out
+            self.file(details="- w-0f0cfb, fires 10:00\n- w-3c68fa, fires 10:00")   # w-55e1c0 left out
+        with self.assertRaises(ValueError):
+            self.file(details="w-0f0cfb,w-3c68fa,w-55e1c0")                      # ids alone: not when each fires
+        with self.assertRaises(ValueError):
+            self.file(kind="principal-reset", target="art:cv-0123456789ab", details=".")   # not the conversation
         with self.assertRaises(ValueError):
             self.file(kind="principal-reset", target="art:cv-0123456789ab", details=" ")
         # Another agent's wake, or a malformed id: refused at the filing.
@@ -1595,18 +1602,18 @@ class OwnerApplied(unittest.TestCase):
         aid = self.file()
         # Overlapping a card still waiting: refused (the piece withdraws that one first).
         with self.assertRaises(PermissionError):
-            self.file(target="art:w-0f0cfb,w-840b4e", details="- w-0f0cfb, w-840b4e: fires 10:00")
+            self.file(target="art:w-0f0cfb,w-840b4e", details="- w-0f0cfb, fires 10:00\n- w-840b4e, fires 10:00")
         self.assertEqual(self.file(), aid, "the same card again is the same card")
         ap.ui_act({"action": "deny", "fields": {"id": aid}, "caller": OWNER_CALLER})
         for t in ("art:w-0f0cfb,w-3c68fa,w-55e1c0", "art:w-3c68fa", "art:w-3c68fa,w-840b4e"):
             with self.assertRaises(PermissionError) as e:
-                self.file(target=t, details=f"- {t.split(':')[1]}: fires 10:00")
+                self.file(target=t, details="\n".join(f"- {i}, fires 10:00" for i in t.split(":")[1].split(",")))
             self.assertIn("not asked again", str(e.exception))
-        self.assertTrue(self.file(target="art:w-840b4e", details="- w-840b4e: fires 10:00").startswith("a-"))
-        r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="Slack, #general")
+        self.assertTrue(self.file(target="art:w-840b4e", details="- w-840b4e, fires 10:00").startswith("a-"))
+        r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="The conversation: Slack, #general (cv-0123456789ab)")
         ap.ui_act({"action": "deny", "fields": {"id": r}, "caller": OWNER_CALLER})
         with self.assertRaises(PermissionError):
-            self.file(kind="principal-reset", target="art:cv-0123456789ab", details="Slack, #general")
+            self.file(kind="principal-reset", target="art:cv-0123456789ab", details="The conversation: Slack, #general (cv-0123456789ab)")
 
     def test_filed_and_spent_on_the_owner_s_behalf_only_never_from_a_body(self):
         with self.assertRaises(ValueError):
@@ -1622,7 +1629,7 @@ class OwnerApplied(unittest.TestCase):
                 with self.assertRaises(PermissionError):
                     ap.run(["use", aid, "--kind", "vouch-wake", "--target", t, "--as", self.AS, "--on-behalf", "owner"])
                 with self.assertRaises(PermissionError):
-                    self.file(target="art:w-0000ff", details="- w-0000ff")
+                    self.file(target="art:w-0000ff", details="- w-0000ff, fires 10:00")
                 with self.assertRaises(PermissionError):
                     ap.run(["withdraw", aid, "--as", self.AS])
         # On loom's machine with no --as, even as the card's own agent: refused (a piece's spend always says whose).
@@ -1639,12 +1646,12 @@ class OwnerApplied(unittest.TestCase):
         self.assertEqual(done[0]["text"], "Count these 3 scheduled jobs as your work?")
 
     def test_a_no_overrules_an_earlier_unspent_yes_covering_the_same_wake(self):
-        a1 = self.file(target="art:w-000001,w-000002", details="- w-000001, w-000002")
-        a2 = self.file(target="art:w-000003", details="- w-000003")
+        a1 = self.file(target="art:w-000001,w-000002", details="- w-000001, fires 10:00\n- w-000002, fires 10:00")
+        a2 = self.file(target="art:w-000003", details="- w-000003, fires 10:00")
         ap.ui_act({"action": "allow", "fields": {"id": a1}, "caller": OWNER_CALLER})
         # Overlapping a yes not applied yet: refused (apply it first), so a No can't land on part of a yes.
         with self.assertRaises(PermissionError):
-            self.file(target="art:w-000002,w-000004", details="- w-000002, w-000004")
+            self.file(target="art:w-000002,w-000004", details="- w-000002, fires 10:00\n- w-000004, fires 10:00")
         ap.run(["withdraw", a2, "--as", self.AS])
         # Filed before the yes and answered No after it (both waiting at once can't happen for one wake, so by hand):
         b = {**ap.get(a1), "id": "a-0000dead", "target": "art:w-000002,w-000009", "state": "denied", "decided": "2999-01-01T00:00:00Z"}
@@ -1656,28 +1663,36 @@ class OwnerApplied(unittest.TestCase):
         self.assertIn("overruled", str(e.exception))
         # A No changes no other card: a1 is still allowed, and w-000003 (asked, then withdrawn) can be asked again.
         self.assertEqual(ap.get(a1)["state"], "allowed")
-        self.assertTrue(self.file(target="art:w-000003", details="- w-000003").startswith("a-"))
+        self.assertTrue(self.file(target="art:w-000003", details="- w-000003, fires 10:00").startswith("a-"))
 
     def test_a_no_outlives_the_store_s_trim(self):
-        aid = self.file(target="art:w-00000a", details="- w-00000a")
+        aid = self.file(target="art:w-00000a", details="- w-00000a, fires 10:00")
         ap.ui_act({"action": "deny", "fields": {"id": aid}, "caller": OWNER_CALLER})
         with ap.Store() as st:      # older than everything after it, so a trim to the newest would drop it
             st.d["approvals"][aid]["at"] = "2000-01-01T00:00:00Z"
             st.save()
         with mock.patch.object(ap, "KEEP", 1):
-            self.file(target="art:w-00000b", details="- w-00000b")
-            self.file(target="art:w-00000c", details="- w-00000c")
+            self.file(target="art:w-00000b", details="- w-00000b, fires 10:00")
+            self.file(target="art:w-00000c", details="- w-00000c, fires 10:00")
         with self.assertRaises(PermissionError):
-            self.file(target="art:w-00000a", details="- w-00000a")
+            self.file(target="art:w-00000a", details="- w-00000a, fires 10:00")
 
     def test_filed_from_the_runtime_s_house_spent_by_its_plain_caller(self):
         out = ap.run(["request", "--kind", "principal-reset", "--target", "art:cv-0123456789ab", "--ask", "Count it?", "--why", "w",
-                      "--if-yes", "y", "--if-no", "n", "--details", "Slack, #general",
+                      "--if-yes", "y", "--if-no", "n", "--details", "The conversation: Slack, #general (cv-0123456789ab)",
                       "--as", json.dumps({"kind": "agent", "agent": "art", "house": "loom's runtime"}), "--on-behalf", "owner"])
         aid = out.split(":")[0]
         ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
         self.assertEqual(ap.run(["use", aid, "--kind", "principal-reset", "--target", "art:cv-0123456789ab",
                                  "--as", json.dumps({"kind": "agent", "agent": "art"}), "--on-behalf", "owner"]), f"{aid}: used\n")
+
+    def test_asking_again_for_an_allowed_card_not_yet_applied_says_so(self):
+        aid = self.file()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        out = ap.run(["request", "--kind", "vouch-wake", "--target", "art:w-0f0cfb,w-3c68fa,w-55e1c0", "--ask", "Count these?",
+                      "--why", "w", "--if-yes", "y", "--if-no", "n", "--details", "- w-0f0cfb, fires 1\n- w-3c68fa, fires 2\n- w-55e1c0, fires 3",
+                      "--as", self.AS, "--on-behalf", "owner"])
+        self.assertEqual(out, f"{aid}: the owner allowed it; the piece that filed it applies it (use it there: --kind vouch-wake)\n")
 
 
 if __name__ == "__main__":
