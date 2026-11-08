@@ -1625,9 +1625,10 @@ class OwnerApplied(unittest.TestCase):
                     self.file(target="art:w-0000ff", details="- w-0000ff")
                 with self.assertRaises(PermissionError):
                     ap.run(["withdraw", aid, "--as", self.AS])
-        # On loom's machine with no --as: refused (a piece's spend always says whose and for whom).
-        with self.assertRaises(PermissionError):
+        # On loom's machine with no --as, even as the card's own agent: refused (a piece's spend always says whose).
+        with mock.patch.object(ap, "LOCAL_AGENT", "art"), self.assertRaises(PermissionError) as e:
             ap.run(["use", aid, "--kind", "vouch-wake", "--target", t])
+        self.assertIn("--as the agent", str(e.exception))
         self.assertEqual(ap.get(aid)["state"], "allowed")
 
     def test_a_withdrawn_card_shows_under_answered_in_loom_s_inbox(self):
@@ -1660,6 +1661,9 @@ class OwnerApplied(unittest.TestCase):
     def test_a_no_outlives_the_store_s_trim(self):
         aid = self.file(target="art:w-00000a", details="- w-00000a")
         ap.ui_act({"action": "deny", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        with ap.Store() as st:      # older than everything after it, so a trim to the newest would drop it
+            st.d["approvals"][aid]["at"] = "2000-01-01T00:00:00Z"
+            st.save()
         with mock.patch.object(ap, "KEEP", 1):
             self.file(target="art:w-00000b", details="- w-00000b")
             self.file(target="art:w-00000c", details="- w-00000c")
