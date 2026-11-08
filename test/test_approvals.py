@@ -1449,5 +1449,136 @@ class Grants(unittest.TestCase):
         self.assertEqual(r["body"]["approvals"][aid], {"state": "pending", "agent": "ada", "kind": "grant", "target": "tasks:mark"})
 
 
+class OwnerApplied(unittest.TestCase):
+    """Owner-only actions asked on loom's page (t-1975): the clock's vouch-wake and the runtime's principal-reset. Filed
+    by the piece (never a body), answered only by the household owner, spent only by the piece, for exactly its target."""
+    AS = json.dumps({"kind": "agent", "agent": "art"})
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(ap, "STATE", Path(self.td.name))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.td.cleanup()
+
+    def file(self, kind="vouch-wake", target="art:w-0f0cfb,w-3c68fa,w-55e1c0", details="- t-40 confirm first backup run, fires today at 10:00"):
+        out = ap.run(["request", "--kind", kind, "--target", target, "--ask", "Count these scheduled jobs as your work?",
+                      "--why", "They were set before loom could say whom each was for.", "--if-yes", "y", "--if-no", "n",
+                      "--details", details, "--as", self.AS, "--on-behalf", "owner"])
+        return out.split(":")[0]
+
+    def card(self, aid):
+        return [a for a in ap.ui_manifest()["asks"] if a["actions"][0]["fields"]["id"] == aid][0]
+
+    def test_targets_are_exact_sorted_and_bounded(self):
+        self.assertEqual(ap.vouch_of("art:w-0f0cfb,w-3c68fa"), {"agent": "art", "ids": ["w-0f0cfb", "w-3c68fa"]})
+        self.assertEqual(ap.reset_of("art:cv-0123456789ab"), {"agent": "art", "conversation": "cv-0123456789ab"})
+        twelve = ",".join(f"w-{i:06x}" for i in range(12))
+        self.assertIsNotNone(ap.vouch_of(f"art:{twelve}"))
+        for bad in ("art:w-3c68fa,w-0f0cfb", "art:w-0f0cfb,w-0f0cfb", "art:", "art:w-0f0cfb,", "art:w-0f0cfb,*", "art:*",
+                    f"art:{twelve},w-ffffff", "Art:w-0f0cfb", "art:w-0f0cf"):
+            self.assertIsNone(ap.vouch_of(bad), bad)
+        for bad in ("art:cv-0123", "art:cv-0123456789ab,cv-0123456789ac", "art", "art:w-0f0cfb"):
+            self.assertIsNone(ap.reset_of(bad), bad)
+        with self.assertRaises(ValueError):
+            self.file(target="art:w-3c68fa,w-0f0cfb")
+        with self.assertRaises(ValueError):
+            self.file(kind="principal-reset", target="art:w-0f0cfb")
+
+    def test_only_a_piece_files_them_and_only_for_its_own_agent(self):
+        for kind, target in (("vouch-wake", "ada:w-0f0cfb"), ("principal-reset", "ada:cv-0123456789ab")):
+            r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned([
+                "request", "--kind", kind, "--target", target, "--ask", "Count it as your work?", "--why", "w",
+                "--if-yes", "y", "--if-no", "n"])}})
+            self.assertEqual(r["body"]["exit"], 1, kind)
+            self.assertIn("not by a body", r["body"]["stderr"])
+        with self.assertRaises(PermissionError):
+            self.file(target="ada:w-0f0cfb")
+
+    def test_the_card_is_in_the_piece_s_words_with_its_listing(self):
+        aid = self.file()
+        c = self.card(aid)
+        self.assertEqual(c["text"], "Count these 3 scheduled jobs as your work?")
+        self.assertIn("t-40 confirm first backup run", c["details"])
+        self.assertEqual(c["actions"][0]["label"], "Allow")
+        self.assertTrue(c["lead"])
+        self.assertIn("fire as your work", c["if_yes"])
+        self.assertTrue(c["if_no"].startswith("Nothing changes"))
+        self.assertIn("w-0f0cfb, w-3c68fa, w-55e1c0", c["fine"])
+        self.assertLessEqual(len(c["fine"]), 400)
+        one = self.file(target="art:w-840b4e")
+        self.assertEqual(self.card(one)["text"], "Count this scheduled job as your work?")
+        r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="The conversation: Slack, #general")
+        self.assertEqual(self.card(r)["text"], "Count this conversation as your work from now on?")
+        self.assertIn("cv-0123456789ab", self.card(r)["fine"])
+
+    def test_only_the_household_owner_answers(self):
+        aid = self.file()
+        for caller in (MEMBER_CALLER, None, {"kind": "agent", "agent": "art"}):
+            for act in ("allow", "deny"):
+                r = ap.ui_act({"action": act, "fields": {"id": aid}, **({"caller": caller} if caller else {})})
+                self.assertFalse(r["ok"], (caller, act))
+                self.assertIn("household owner", r["message"])
+        self.assertEqual(ap.get(aid)["state"], "pending")
+        r = ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["message"], "Allowed: Count these 3 scheduled jobs as your work.")
+
+    def test_only_the_piece_spends_it_for_exactly_its_target(self):
+        aid = self.file()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        r = ap.api_answer({"caller": {"kind": "agent", "agent": "art", "house": "h-1"}, "path": "run", "body": {"argv": [
+            "use", aid, "--kind", "vouch-wake", "--target", "art:w-0f0cfb,w-3c68fa,w-55e1c0"]}})
+        self.assertEqual(r["body"]["exit"], 1)
+        self.assertIn("not by a body", r["body"]["stderr"])
+        # Never widened: one more wake, or one fewer, is another target.
+        for t in ("art:w-0f0cfb,w-3c68fa,w-55e1c0,w-840b4e", "art:w-0f0cfb,w-3c68fa"):
+            with self.assertRaises(PermissionError):
+                ap.run(["use", aid, "--kind", "vouch-wake", "--target", t, "--as", self.AS, "--on-behalf", "owner"])
+        self.assertEqual(ap.run(["use", aid, "--kind", "vouch-wake", "--target", "art:w-0f0cfb,w-3c68fa,w-55e1c0",
+                                 "--as", self.AS, "--on-behalf", "owner"]), f"{aid}: used\n")
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "vouch-wake", "--target", "art:w-0f0cfb,w-3c68fa,w-55e1c0", "--as", self.AS, "--on-behalf", "owner"])
+
+    def test_a_deny_is_recorded_and_can_t_be_spent(self):
+        aid = self.file(kind="principal-reset", target="art:cv-0123456789ab")
+        self.assertTrue(ap.ui_act({"action": "deny", "fields": {"id": aid}, "caller": OWNER_CALLER})["ok"])
+        self.assertEqual(ap.get(aid)["state"], "denied")
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "principal-reset", "--target", "art:cv-0123456789ab", "--as", self.AS, "--on-behalf", "owner"])
+
+    def test_state_carries_the_target_for_core(self):
+        aid = self.file()
+        r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})
+        self.assertEqual(r["body"]["approvals"][aid], {"state": "pending", "agent": "art", "kind": "vouch-wake",
+                                                        "target": "art:w-0f0cfb,w-3c68fa,w-55e1c0"})
+
+    def test_the_piece_withdraws_its_own_pending_card_only(self):
+        aid = self.file()
+        r = ap.api_answer({"caller": {"kind": "agent", "agent": "art", "house": "h-1"}, "path": "run", "body": {"argv": ["withdraw", aid]}})
+        self.assertEqual(r["body"]["exit"], 1)
+        with self.assertRaises(PermissionError):
+            ap.run(["withdraw", aid, "--as", json.dumps({"kind": "agent", "agent": "ada"})])
+        self.assertEqual(ap.run(["withdraw", aid, "--as", self.AS]), f"{aid}: withdrawn\n")
+        self.assertEqual(ap.get(aid)["state"], "withdrawn")
+        self.assertEqual([a for a in ap.ui_manifest()["asks"] if a["actions"][0]["fields"]["id"] == aid], [])
+        self.assertFalse(ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})["ok"])
+        # An answer stands: an allowed one can't be withdrawn.
+        b = self.file(target="art:w-840b4e")
+        ap.ui_act({"action": "allow", "fields": {"id": b}, "caller": OWNER_CALLER})
+        with self.assertRaises(PermissionError):
+            ap.run(["withdraw", b, "--as", self.AS])
+        # A body's own kinds aren't the piece's to withdraw.
+        m = ap.api_answer({"caller": {"kind": "agent", "agent": "art", "house": "h-1"}, "path": "run", "body": {"argv": owned([
+            "request", "--kind", "github-write", "--target", "x/y", "--ask", "May I push to the repo?", "--why", "w", "--if-yes", "y", "--if-no", "n"])}})
+        mid = m["body"]["stdout"].split(":")[0]
+        with self.assertRaises(PermissionError):
+            ap.run(["withdraw", mid, "--as", self.AS])
+        page = json.dumps(ap.ui_page({"path": "", "caller": OWNER_CALLER}))
+        self.assertIn("Withdrawn unanswered", page)
+
+
 if __name__ == "__main__":
     unittest.main()

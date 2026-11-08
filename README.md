@@ -135,6 +135,27 @@ approvals request --kind grant --target tasks:mark --ask "Give Mark access to Ta
   it can't spend the owner's yes without the grant being applied.
 - `state` (core's read) carries a grant's target, so core can hand it to the runtime.
 
+## Whose work it is
+
+Two owner-only actions used to need the owner at a terminal on loom's machine; now he's asked on loom's page, and his
+Allow does it (t-1975). Both are filed by the piece that owns the state (never a body: the words on the card are the
+piece's), answered only by the household owner, and spent only by that piece, in the step that applies it.
+
+- **`vouch-wake`**, target `<agent>:<w-id>[,<w-id>…]` (1 to 12 wake ids, sorted, each once: one set has one target),
+  filed by the clock: "Count these 8 scheduled jobs as your work?", each wake listed (`--details`) with what it's for
+  and when it fires. Allow: the clock marks exactly those wakes, still pending and unknown, as the owner's work.
+- **`principal-reset`**, target `<agent>:<cv-id>`, filed by the runtime: "Count this conversation as your work from
+  now on?", with its label. Allow: the runtime resets whom it acts for, signed as the owner's (`loom runtime principal
+  --reset`, without the terminal).
+- **The card's headline, "If you allow" and "If you deny" are this piece's**, from the target; its Allow says
+  **Allow**. A request for another agent's wakes or conversation is refused.
+- **Only the household owner answers** (a member who owns some agents is refused, Allow and Deny). Right after his
+  Allow, loom core reads the approval back (`state` carries the target) and posts it to the piece that applies it as
+  him. Deny records no, and nothing changes.
+- **`withdraw ID --as <agent>`**: the filing piece takes back its own pending card, unanswered (the clock refreshing
+  its one card with an up-to-date list). Only a kind a piece files, only while pending; never over the API. It shows
+  under Answered as "Withdrawn unanswered".
+
 ## Standing rules
 
 Most merges don't need asking. A **standing rule** is the owner's lasting
