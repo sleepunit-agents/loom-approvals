@@ -1463,7 +1463,7 @@ class OwnerApplied(unittest.TestCase):
         self.p.stop()
         self.td.cleanup()
 
-    def file(self, kind="vouch-wake", target="art:w-0f0cfb,w-3c68fa,w-55e1c0", details="- t-40 confirm first backup run, fires today at 10:00"):
+    def file(self, kind="vouch-wake", target="art:w-0f0cfb,w-3c68fa,w-55e1c0", details="- t-40 confirm first backup run (w-0f0cfb, w-3c68fa, w-55e1c0): fires today at 10:00"):
         out = ap.run(["request", "--kind", kind, "--target", target, "--ask", "Count these scheduled jobs as your work?",
                       "--why", "They were set before loom could say whom each was for.", "--if-yes", "y", "--if-no", "n",
                       "--details", details, "--as", self.AS, "--on-behalf", "owner"])
@@ -1508,7 +1508,7 @@ class OwnerApplied(unittest.TestCase):
         self.assertTrue(c["if_no"].startswith("Nothing changes"))
         self.assertIn("w-0f0cfb, w-3c68fa, w-55e1c0", c["fine"])
         self.assertLessEqual(len(c["fine"]), 400)
-        one = self.file(target="art:w-840b4e")
+        one = self.file(target="art:w-840b4e", details="- Check the backup (w-840b4e): fires 10:00 AM")
         self.assertEqual(self.card(one)["text"], "Count this scheduled job as your work?")
         r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="The conversation: Slack, #general")
         self.assertEqual(self.card(r)["text"], "Count this conversation as your work from now on?")
@@ -1566,7 +1566,7 @@ class OwnerApplied(unittest.TestCase):
         self.assertEqual([a for a in ap.ui_manifest()["asks"] if a["actions"][0]["fields"]["id"] == aid], [])
         self.assertFalse(ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})["ok"])
         # An answer stands: an allowed one can't be withdrawn.
-        b = self.file(target="art:w-840b4e")
+        b = self.file(target="art:w-840b4e", details="- Check the backup (w-840b4e): fires 10:00 AM")
         ap.ui_act({"action": "allow", "fields": {"id": b}, "caller": OWNER_CALLER})
         with self.assertRaises(PermissionError):
             ap.run(["withdraw", b, "--as", self.AS])
@@ -1578,6 +1578,18 @@ class OwnerApplied(unittest.TestCase):
             ap.run(["withdraw", mid, "--as", self.AS])
         page = json.dumps(ap.ui_page({"path": "", "caller": OWNER_CALLER}))
         self.assertIn("Withdrawn unanswered", page)
+
+    def test_a_card_lists_exactly_what_it_covers_or_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.file(details="")
+        with self.assertRaises(ValueError):
+            self.file(details="- t-40 confirm (w-0f0cfb, w-3c68fa): fires 10:00")   # w-55e1c0 left out
+        with self.assertRaises(ValueError):
+            self.file(kind="principal-reset", target="art:cv-0123456789ab", details=" ")
+        # Another agent's wake, or a malformed id: refused at the filing.
+        for t in ("ada:w-0f0cfb", "art:w-0F0CFB", "art:w-0f0cfb,*"):
+            with self.assertRaises((ValueError, PermissionError)):
+                self.file(target=t, details=f"- x ({t}): fires 10:00")
 
 
 if __name__ == "__main__":

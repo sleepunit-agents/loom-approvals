@@ -563,6 +563,14 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
     if kind in (VOUCH_KIND, RESET_KIND) and (vouch_of(target) or reset_of(target))["agent"] != who["agent"]:
         # Filed for the agent whose wakes or conversation it names: its owner reads whose they are from the card.
         raise PermissionError(f"a {kind} approval names the agent it's filed for ({who['agent']})")
+    if kind in (VOUCH_KIND, RESET_KIND):
+        # The owner reads exactly what his Allow does: each wake (its note and when it fires) or the conversation (its
+        # label), resolved by the piece that files it. A card without them, or one that leaves a wake out, is refused.
+        d = str(details or "")
+        if not d.strip() or not ask:
+            raise ValueError(f"a {kind} card lists what it covers (--details, with --ask): each wake, or the conversation")
+        if kind == VOUCH_KIND and not all(i in d for i in vouch_of(target)["ids"]):
+            raise ValueError("a vouch-wake card's --details lists every wake on it, by id")
     # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
     # are refused, never cut, so nothing can hide past the part the owner reads.
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
