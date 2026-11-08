@@ -150,6 +150,37 @@ def iso(t):
 # can't put its own words on a card the owner reads as the piece's.
 PIECE_KINDS = {"local-wake"}
 
+# Access to one of loom's pieces for an agent (loom docs/specs/agent-runtime.md, "6. Permissions"; t-1970): a body asks
+# with --kind grant --target <piece>:<agent>[:<path>,<path>], and the household owner's Allow is applied by the runtime
+# (loom's grants authority) at once, as the owner: Mark may use Tasks from then on. So it isn't spent by a body: only the
+# runtime on loom's machine spends it (--as the agent that asked), in the same step that applies it. And only the
+# household owner answers it: an agent's owner (a member) can't give an agent a piece of the household's.
+GRANT_KIND = "grant"
+PIECE_SPENT = {GRANT_KIND}
+GRANT_NAME = r"[a-z][a-z0-9-]{0,39}"
+GRANT_PATH = r"(?:\*|[A-Za-z0-9._@-]+(?:/[A-Za-z0-9._@-]+)*(?:/\*)?)"
+GRANT_TARGET = re.compile(rf"({GRANT_NAME}):({GRANT_NAME})(?::({GRANT_PATH}(?:,{GRANT_PATH}){{0,9}}))?")
+
+
+def grant_of(target):
+    """A grant target as {piece, agent, paths}, or None: tasks:mark, tasks:mark:run, tasks:mark:people/*,run."""
+    m = GRANT_TARGET.fullmatch(str(target or ""))
+    if not m:
+        return None
+    paths = m.group(3).split(",") if m.group(3) else ["*"]
+    if any(x in (".", "..") for p in paths for x in p.split("/")):
+        return None
+    return {"piece": m.group(1), "agent": m.group(2), "paths": paths}
+
+
+def grant_words(target):
+    """What a grant's Allow gives, in the piece's words (never the body's): "Give Mark access to Tasks?"."""
+    g = grant_of(target)
+    if not g:
+        return None
+    only = "" if "*" in g["paths"] else f" (only {', '.join(g['paths'])})"
+    return f"Give {name_of(g['agent'])} access to {name_of(g['piece'])}{only}?"
+
 
 def exact_target(target):
     """A target is approved and spent as exactly the text the owner read, compared raw. It is an identifier (a repo, a
@@ -433,6 +464,9 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
     target = exact_target(target)
     if kind == "merge" and not repo_of(target):
         raise ValueError("a merge target is literal: <forge>:<owner>/<repo>#<n>@<40-hex head>, letters, digits, . _ - only")
+    if kind == GRANT_KIND and not grant_of(target):
+        raise ValueError("a grant target is <piece>:<agent>, or <piece>:<agent>:<path>,<path> for only those paths "
+                         "(a path, or a prefix ending in /*): tasks:mark")
     # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
     # are refused, never cut, so nothing can hide past the part the owner reads.
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
@@ -519,9 +553,9 @@ def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=N
     """Spend an allowed approval for exactly the action it allowed, for the one it was asked for. True once.
     `unstated`: a piece on loom's machine spending for a body (--as) without saying on whose behalf (--on-behalf): the
     runtime's relay, which has no conversation to ask about. Everything else is checked; whom it was for isn't."""
-    if kind in PIECE_KINDS and not acting_for:
-        # Spent by the piece that runs it (the clock sets the wake), never by a body: a body's own `use` would
-        # spend the owner's yes and run nothing.
+    if (kind in PIECE_KINDS or kind in PIECE_SPENT) and not acting_for:
+        # Spent by the piece that runs it (the clock sets the wake, the runtime applies a grant), never by a body: a
+        # body's own `use` would spend the owner's yes and run nothing.
         raise PermissionError(f"a {kind} approval is spent by the piece on loom's machine that runs it, not by a body")
     who = who_of(caller)
     target = exact_target(target)
@@ -971,7 +1005,8 @@ OUTCOME = {"allowed": "Allowed, not used yet.", "used": "Allowed, and used.", "d
 # The page says what an approval is for in plain words, not ids.
 STATE_WORDS = {"pending": "Waiting on you", "allowed": "Allowed", "used": "Used", "denied": "Denied", "expired": "Expired"}
 # The kinds the clock piece files, plus any the instance names (APPROVALS_KINDS).
-KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent", "merge": "A merge"}
+KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent", "merge": "A merge",
+              "grant": "Access to a piece"}
 try:
     _extra = json.loads(setting("APPROVALS_KINDS", "{}"))
     KIND_WORDS.update({k: v for k, v in _extra.items() if KIND.match(str(k)) and isinstance(v, str)} if isinstance(_extra, dict) else {})
@@ -1040,6 +1075,9 @@ def headline(a):
     """The card's headline. For the owner's own work, the body's plain ask. For anyone else's (t-1943) it says whose,
     first: a merge as "Merge on-pond#220 for Loren?", anything else as "For Loren: <the ask>". The words are the
     piece's, never the body's: the body can't make a card for Loren read as the owner's."""
+    if a.get("kind") == GRANT_KIND and grant_words(a.get("target")):
+        # What Allow gives, from the target it applies: the body's words are the detail under it, never the headline.
+        return grant_words(a["target"])
     fw = for_words(a)
     if not fw:
         return body_ask(a)
@@ -1056,6 +1094,11 @@ def ask_detail(a):
 
 def fine_print(a):
     """Exactly what Allow allows: the kind and target (machine fields), where it was asked from, for whom, for how long."""
+    if a.get("kind") == GRANT_KIND and grant_of(a.get("target")):
+        g = grant_of(a["target"])
+        what = "all of it" if "*" in g["paths"] else f"only {', '.join(g['paths'])}"
+        return (f"{kind_of(a)}, {from_of(a)}. Allowing it gives {name_of(g['agent'])} {name_of(g['piece'])} ({what}) from now on: "
+                "the runtime applies it at once, as you, and it stays until you change it on Permissions.")
     fw = for_words(a)
     named = a.get("people") or []
     everyone = f" ({', '.join(person_name(p) for p in named)})" if len(named) > 3 else ""
@@ -1081,10 +1124,10 @@ def ui_manifest():
         "fine": fine_print(a),
         "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
         **({"conversation": a["conversation"]} if a.get("conversation") else {}),
-        "actions": [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}},
+        "actions": [{"action": "allow", "label": allow_label(a), "tone": "primary", "fields": {"id": a["id"]}},
                     {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}],
     } for a in pending], "answered": [{
-        "text": (headline(a) if a.get("ask") or for_words(a) else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
+        "text": (headline(a) if a.get("ask") or for_words(a) or a["kind"] == GRANT_KIND else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
         "outcome": OUTCOME[a["state"]] + (f" ({'Allowed' if a['state'] != 'denied' else 'Denied'} by {a['by']}.)" if a.get("by") else ""),
         "at": a.get("used") or a.get("decided") or a["at"], "kind": "permission", "agent": a["who"]["agent"], "page": "",
     } for a in done], "notices": [notice_of(n) for n in notices()[:20]]}
@@ -1154,8 +1197,13 @@ def always_scope(a, cards):
     return r["repo"], (f"Always for {r['locator']}" if f == OWNER else f"{lead} {r['locator']}")
 
 
+def allow_label(a):
+    """Allow once, for a single action; a grant lasts, so its Allow says only Allow."""
+    return "Allow" if a.get("kind") == GRANT_KIND else "Allow once"
+
+
 def answers_of(a, cards=None):
-    items = [{"action": "allow", "label": "Allow once", "tone": "primary", "fields": {"id": a["id"]}}]
+    items = [{"action": "allow", "label": allow_label(a), "tone": "primary", "fields": {"id": a["id"]}}]
     al = always_scope(a, cards) if cards is not None else None
     if al:
         items.append({"action": "always", "label": al[1], "fields": {"id": a["id"]}})
@@ -1227,7 +1275,7 @@ def ui_page(req):
         sections.append(rules_section(cards))
     if past:
         sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
-            "text": headline(a) if a.get("ask") or for_words(a) else f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
+            "text": headline(a) if a.get("ask") or for_words(a) or a["kind"] == GRANT_KIND else f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
             "tone": {"denied": "bad", "expired": "muted"}.get(a["state"]),
         } for a in past]}]})
     if rows:
@@ -1363,9 +1411,15 @@ def ui_act(req):
     if action not in ("allow", "deny") or not ID.match(str(aid)):
         return {"ok": False, "message": "That isn't an approval.", "page": ""}
     try:
+        if get(aid)["kind"] == GRANT_KIND and not is_owner(req):
+            # The household's pieces are its owner's to give (t-1970): an agent's owner answers its other asks, not this.
+            return {"ok": False, "message": "Access to a piece is the household owner's to give or refuse.", "page": ""}
         a = answer(aid, action, caller_who(req))
     except (LookupError, PermissionError) as e:
         return {"ok": False, "message": str(e), "page": ""}
+    if a["kind"] == GRANT_KIND:
+        # loom applies an allowed grant through the runtime right after this answer, and says so itself.
+        return {"ok": True, "message": f"{'Allowed' if action == 'allow' else 'Denied'}: {headline(a).rstrip('?')}.", "page": ""}
     return {"ok": True, "message": f"{'Allowed once' if action == 'allow' else 'Denied'}: {a['what']}"
             + (f" (for {a['minutes']} min)" if action == "allow" else ""), "page": ""}
 
@@ -1380,7 +1434,9 @@ def states(ids):
     known id's state and whose it is. No words: core shows the card's own (ui --json) while it waits."""
     with Store() as s:
         rows = s.d["approvals"]
-        return {i: {"state": state_of(rows[i]), "agent": rows[i]["who"].get("agent"), "kind": rows[i]["kind"]}
+        # A grant's target too: an identifier (<piece>:<agent>), which core hands the runtime to spend and apply.
+        return {i: {"state": state_of(rows[i]), "agent": rows[i]["who"].get("agent"), "kind": rows[i]["kind"],
+                    **({"target": rows[i]["target"]} if rows[i]["kind"] == GRANT_KIND else {})}
                 for i in ids if i in rows}
 
 
@@ -1497,8 +1553,9 @@ def run(argv, caller=None):
     if a.cmd == "use":
         # Over the API (a body) only with no wake kind; on loom's machine (the clock, with or without --as) any.
         use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller, statement=statement, on_behalf=a.on_behalf or None,
-            # Only the runtime's relay may leave whom unsaid (t-1953); any other kind a piece spends says it, or is held to unknown.
-            unstated=bool(a.as_) and not a.on_behalf and a.kind == "relay")
+            # Only the runtime may leave whom unsaid (t-1953): its relay, and a grant it applies (the owner's own decision
+            # about an agent, whoever the body asked for); any other kind a piece spends says it, or is held to unknown.
+            unstated=bool(a.as_) and not a.on_behalf and a.kind in ("relay", GRANT_KIND))
         return f"{a.id}: used\n"
     if a.cmd == "rule":
         return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement)
