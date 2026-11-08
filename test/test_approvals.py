@@ -1372,6 +1372,7 @@ class Grants(unittest.TestCase):
         # Beside Allow, the piece's words, never the body's.
         self.assertEqual(card["if_yes"], "Mark can use Tasks (all of it) from now on, added to whatever else it has.")
         self.assertIn("nothing is taken away", card["fine"])
+        self.assertEqual(card["if_no"], "Nothing changes: Mark can't use any more of Tasks than it can now.")
 
     def test_only_the_household_owner_answers_a_grant(self):
         aid = self.ask()
@@ -1406,6 +1407,15 @@ class Grants(unittest.TestCase):
         self.assertEqual(ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps(HOUSE)]), f"{aid}: used\n")
         with self.assertRaises(PermissionError):
             ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps(HOUSE)])
+
+    def test_asking_again_for_one_allowed_but_not_applied_never_says_use_it(self):
+        aid = self.ask()
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned([
+            "request", "--kind", "grant", "--target", "tasks:mark", "--ask", "Give Mark access to Tasks?", "--why", "w",
+            "--if-yes", "y", "--if-no", "n"])}})
+        self.assertIn("wasn't applied; ask the owner to give it on Permissions", r["body"]["stdout"])
+        self.assertNotIn("approvals use", r["body"]["stdout"])
 
     def test_state_carries_a_grant_s_target_for_core(self):
         aid = self.ask()

@@ -189,6 +189,12 @@ def grant_if_yes(target):
     return f"{name_of(g['agent'])} can use {name_of(g['piece'])} ({some}) from now on, added to whatever else it has."
 
 
+def grant_if_no(target):
+    """What Deny does, in the piece's words."""
+    g = grant_of(target)
+    return f"Nothing changes: {name_of(g['agent'])} can't use any more of {name_of(g['piece'])} than it can now."
+
+
 def exact_target(target):
     """A target is approved and spent as exactly the text the owner read, compared raw. It is an identifier (a repo, a
     wake's agent:hash, a relay's agent->agent), so it is printable ASCII, single spaces between words: nothing that
@@ -1128,7 +1134,7 @@ def ui_manifest():
         # deny"); fine is the small print under "Exactly what this allows".
         **({"why": a["why"], "if_yes": a["if_yes"], "if_no": a["if_no"]} if a.get("ask") else {}),
         # A grant's "If you allow" is the piece's, from its target: what Allow gives is never the body's to describe.
-        **({"if_yes": grant_if_yes(a["target"])} if a["kind"] == GRANT_KIND and grant_of(a["target"]) else {}),
+        **({"if_yes": grant_if_yes(a["target"]), "if_no": grant_if_no(a["target"])} if a["kind"] == GRANT_KIND and grant_of(a["target"]) else {}),
         **({"details": "\n\n".join(x for x in (ask_detail(a), a.get("details")) if x)} if ask_detail(a) or a.get("details") else {}),
         **({"for": for_of(a)} if for_of(a) != OWNER else {}),
         "fine": fine_print(a),
@@ -1553,6 +1559,9 @@ def run(argv, caller=None):
                     on_behalf=a.on_behalf or None)
         if x["state"] == "denied":
             return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
+        if x["state"] == "allowed" and x["kind"] == GRANT_KIND:
+            # Applied by loom at the owner's Allow; one still allowed wasn't (loom told the owner why, at the Allow).
+            return f"{x['id']}: the owner allowed it, but it wasn't applied; ask the owner to give it on Permissions\n"
         if x["state"] == "allowed":
             return f"{x['id']}: already allowed (until {x['expires']}); use it: approvals use {x['id']} --kind {x['kind']} --target '{x['target']}'\n"
         return f"{x['id']}: asked the owner (a card on loom's Home); check it: approvals check {x['id']}\n"
