@@ -1506,8 +1506,7 @@ class OwnerApplied(unittest.TestCase):
         self.assertTrue(c["lead"])
         self.assertIn("fire as your work", c["if_yes"])
         self.assertTrue(c["if_no"].startswith("Nothing changes"))
-        self.assertIn("w-0f0cfb, w-3c68fa, w-55e1c0", c["fine"])
-        self.assertLessEqual(len(c["fine"]), 400)
+        self.assertTrue(c["fine"].endswith("as you."), "never cut")
         one = self.file(target="art:w-840b4e", details="- Check the backup (w-840b4e): fires 10:00 AM")
         self.assertEqual(self.card(one)["text"], "Count this scheduled job as your work?")
         r = self.file(kind="principal-reset", target="art:cv-0123456789ab", details="The conversation: Slack, #general")
@@ -1629,6 +1628,33 @@ class OwnerApplied(unittest.TestCase):
         done = [x for x in ap.ui_manifest()["answered"] if x["outcome"].startswith("Withdrawn")]
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0]["text"], "Count these 3 scheduled jobs as your work?")
+
+    def test_a_no_overrules_an_earlier_unspent_yes_covering_the_same_wake(self):
+        a1 = self.file(target="art:w-000001,w-000002", details="- w-000001, w-000002")
+        ap.ui_act({"action": "allow", "fields": {"id": a1}, "caller": OWNER_CALLER})
+        a2 = self.file(target="art:w-000002,w-000003", details="- w-000002, w-000003")
+        ap.ui_act({"action": "deny", "fields": {"id": a2}, "caller": OWNER_CALLER})
+        self.assertEqual(ap.get(a1)["state"], "denied")
+        with self.assertRaises(PermissionError):
+            ap.run(["use", a1, "--kind", "vouch-wake", "--target", "art:w-000001,w-000002", "--as", self.AS, "--on-behalf", "owner"])
+
+    def test_a_no_outlives_the_store_s_trim(self):
+        aid = self.file(target="art:w-00000a", details="- w-00000a")
+        ap.ui_act({"action": "deny", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        with mock.patch.object(ap, "KEEP", 1):
+            self.file(target="art:w-00000b", details="- w-00000b")
+            self.file(target="art:w-00000c", details="- w-00000c")
+        with self.assertRaises(PermissionError):
+            self.file(target="art:w-00000a", details="- w-00000a")
+
+    def test_filed_from_the_runtime_s_house_spent_by_its_plain_caller(self):
+        out = ap.run(["request", "--kind", "principal-reset", "--target", "art:cv-0123456789ab", "--ask", "Count it?", "--why", "w",
+                      "--if-yes", "y", "--if-no", "n", "--details", "Slack, #general",
+                      "--as", json.dumps({"kind": "agent", "agent": "art", "house": "loom's runtime"}), "--on-behalf", "owner"])
+        aid = out.split(":")[0]
+        ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
+        self.assertEqual(ap.run(["use", aid, "--kind", "principal-reset", "--target", "art:cv-0123456789ab",
+                                 "--as", json.dumps({"kind": "agent", "agent": "art"}), "--on-behalf", "owner"]), f"{aid}: used\n")
 
 
 if __name__ == "__main__":

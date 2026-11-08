@@ -310,7 +310,9 @@ class Store:
 
     def save(self):
         rows = sorted(self.d["approvals"].values(), key=lambda a: a["at"], reverse=True)
-        self.d["approvals"] = {a["id"]: a for a in rows[:KEEP]}
+        # The owner's No to a vouch or a reset is kept past KEEP (t-1975): it's what stops him being asked again.
+        kept = rows[:KEEP] + [a for a in rows[KEEP:] if a["kind"] in (VOUCH_KIND, RESET_KIND) and a["state"] == "denied"]
+        self.d["approvals"] = {a["id"]: a for a in kept}
         self.write_json(self.path, self.d)
 
     def rules(self):
@@ -608,13 +610,11 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         if kind in (VOUCH_KIND, RESET_KIND):
             # Never asked again after a No, and never two cards waiting for the same wake or conversation: this store is
             # the durable record of his answer, whatever the filing piece remembers (t-1975).
-            mine = set(vouch_of(target)["ids"]) if kind == VOUCH_KIND else {reset_of(target)["conversation"]}
+            mine = covered({"kind": kind, "target": target})
             for a in s.d["approvals"].values():
                 if a["kind"] != kind or a["who"].get("agent") != who["agent"] or a["target"] == target and state_of(a) == "pending":
                     continue
-                theirs = set(vouch_of(a["target"])["ids"]) if kind == VOUCH_KIND and vouch_of(a["target"]) else \
-                    ({reset_of(a["target"])["conversation"]} if kind == RESET_KIND and reset_of(a["target"]) else set())
-                both = sorted(mine & theirs)
+                both = sorted(mine & covered(a))
                 if both and a["state"] == "denied":
                     raise PermissionError(f"the owner said no for {' '.join(both)} already ({a['id']}): not asked again")
                 if both and state_of(a) == "pending":
@@ -749,9 +749,30 @@ def answer(aid, action, by=None, minutes=None):
             a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + (minutes or a["minutes"]) * 60, timezone.utc))
         else:
             deny_siblings(s, a["kind"], a["target"], a["who"].get("agent"), a["id"], by)
+            if a["kind"] in (VOUCH_KIND, RESET_KIND):
+                # A No for a wake (or a conversation) overrules any earlier yes still unspent that covers it, whatever
+                # else that card listed: nothing he said no to is applied.
+                mine = covered(a)
+                for b in s.d["approvals"].values():
+                    if b["id"] != a["id"] and b["kind"] == a["kind"] and b["who"].get("agent") == a["who"].get("agent") \
+                            and state_of(b) in ("pending", "allowed") and covered(b) & mine:
+                        b["state"], b["decided"], b["superseded_by"] = "denied", iso(t), a["id"]
+                        b.pop("expires", None)
+                        if by:
+                            b["by"] = by
+                        s.log("deny-superseded", b, by_deny=a["id"])
         s.save()
         s.log(action, a)
         return a
+
+
+def covered(a):
+    """The wakes (or the conversation) a vouch-wake (or principal-reset) approval covers; empty for any other."""
+    if a.get("kind") == VOUCH_KIND and vouch_of(a.get("target")):
+        return set(vouch_of(a["target"])["ids"])
+    if a.get("kind") == RESET_KIND and reset_of(a.get("target")):
+        return {reset_of(a["target"])["conversation"]}
+    return set()
 
 
 def recent():
@@ -1248,8 +1269,9 @@ def fine_print(a):
                 "until you change it on Permissions.")[:FINE_MAX]
     if a.get("kind") == VOUCH_KIND and vouch_of(a.get("target")):
         v = vouch_of(a["target"])
+        # The ids are listed whole in the details above (each with when it fires): never cut here, so not here at all.
         return (f"Scheduled jobs counted as yours, {from_of(a)}. Allowing it counts exactly the {len(v['ids'])} listed "
-                f"(by id: {', '.join(v['ids'])}) as your work: loom's clock applies it at once, as you.")[:FINE_MAX]
+                "above, by id, as your work: loom's clock applies it at once, as you.")[:FINE_MAX]
     if a.get("kind") == RESET_KIND and reset_of(a.get("target")):
         r = reset_of(a["target"])
         return (f"A conversation counted as yours, {from_of(a)}. Allowing it makes {r['conversation']} your work from "
