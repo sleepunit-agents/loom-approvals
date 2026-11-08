@@ -1617,9 +1617,17 @@ class OwnerApplied(unittest.TestCase):
         t = "art:w-0f0cfb,w-3c68fa,w-55e1c0"
         with self.assertRaises(PermissionError):    # no --on-behalf: whom it's for is said, never left unsaid
             ap.run(["use", aid, "--kind", "vouch-wake", "--target", t, "--as", self.AS])
-        with mock.patch.dict(os.environ, {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}):
-            with self.assertRaises(PermissionError):
-                ap.run(["use", aid, "--kind", "vouch-wake", "--target", t, "--as", self.AS, "--on-behalf", "owner"])
+        for k in ("LOOM_BODY_CONVERSATION", "LOOM_BODY_KEY"):     # either one: a body the runtime runs here
+            with mock.patch.dict(os.environ, {k: "x"}):
+                with self.assertRaises(PermissionError):
+                    ap.run(["use", aid, "--kind", "vouch-wake", "--target", t, "--as", self.AS, "--on-behalf", "owner"])
+                with self.assertRaises(PermissionError):
+                    self.file(target="art:w-0000ff", details="- w-0000ff")
+                with self.assertRaises(PermissionError):
+                    ap.run(["withdraw", aid, "--as", self.AS])
+        # On loom's machine with no --as: refused (a piece's spend always says whose and for whom).
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "vouch-wake", "--target", t])
         self.assertEqual(ap.get(aid)["state"], "allowed")
 
     def test_a_withdrawn_card_shows_under_answered_in_loom_s_inbox(self):
