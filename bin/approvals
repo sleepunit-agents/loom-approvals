@@ -158,7 +158,7 @@ PIECE_KINDS = {"local-wake"}
 GRANT_KIND = "grant"
 PIECE_SPENT = {GRANT_KIND}
 GRANT_NAME = r"[a-z][a-z0-9-]{0,39}"
-GRANT_PATH = r"(?:\*|[A-Za-z0-9._@-]+(?:/[A-Za-z0-9._@-]+)*(?:/\*)?)"
+GRANT_PATH = r"(?:\*|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*(?:/\*)?)"
 GRANT_TARGET = re.compile(rf"({GRANT_NAME}):({GRANT_NAME})(?::({GRANT_PATH}(?:,{GRANT_PATH}){{0,9}}))?")
 
 
