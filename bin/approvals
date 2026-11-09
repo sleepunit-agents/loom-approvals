@@ -636,6 +636,11 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
                 if words and state_of(a) == "pending" and not a.get("ask") and a["who"] == who:
                     a.update({k: v for k, v in words.items() if k in ("ask", "if_yes", "if_no", "details") and v}, why=why)
                     s.save()
+                # Older/local callers could omit the display link. A later continuation repairs that
+                # same pending card instead of making a duplicate or moving an existing thread's card.
+                if conversation and not a.get("conversation") and state_of(a) == "pending":
+                    a["conversation"] = conversation
+                    s.save()
                 # An allowed one counts only if the owner hasn't said no to this exact thing since.
                 if state_of(a) == "allowed" and last and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
                     continue

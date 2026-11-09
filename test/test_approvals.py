@@ -762,6 +762,17 @@ class PlainAsks(unittest.TestCase):
         self.assertEqual(plain["exit"], 0, plain)
         self.assertNotIn("conversation", [a for a in ap.ui_manifest()["asks"] if "third" in a["fine"]][0])
 
+    def test_a_continuation_repairs_missing_pending_provenance_without_duplicate_or_retarget(self):
+        first = self.ask(*self.GOOD)
+        aid = first["stdout"].split(":")[0]
+        later = self.ask(*self.GOOD, "--conversation", "cv-0123456789ab")
+        self.assertEqual(later["exit"], 0, later)
+        self.assertEqual(later["stdout"].split(":")[0], aid)
+        self.assertEqual(len(ap.recent()), 1)
+        self.assertEqual(ap.ui_manifest()["asks"][0]["conversation"], "cv-0123456789ab")
+        self.ask(*self.GOOD, "--conversation", "cv-00000000000f")
+        self.assertEqual(ap.ui_manifest()["asks"][0]["conversation"], "cv-0123456789ab", "never move an existing thread's ask")
+
     def test_in_a_house_a_body_s_request_carries_its_conversation(self):
         seen = {}
         with mock.patch.object(ap, "in_a_house", return_value=True), \
