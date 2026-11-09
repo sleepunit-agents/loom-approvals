@@ -775,6 +775,20 @@ class PlainAsks(unittest.TestCase):
         self.assertEqual(seen["argv"][-4:], ["--conversation", "cv-00000000000f", "--principal", "stmt.mac"])
         self.assertNotIn("typed", seen["argv"])
 
+    def test_local_body_request_carries_conversation_without_replacing_explicit_provenance(self):
+        for explicit in ([], ["--conversation", "cv-00000000000e"]):
+            with mock.patch.object(ap, "LOCAL_BODY", False), \
+                 mock.patch.object(ap, "in_a_house", return_value=False), \
+                 mock.patch.dict(ap.os.environ, {"LOOM_BODY_CONVERSATION": "cv-00000000000f"}), \
+                 mock.patch.object(ap, "fetch_statement", return_value="stmt.mac"), \
+                 mock.patch.object(ap, "run", return_value="") as run, \
+                 mock.patch.object(ap.sys, "argv", ["approvals", "request", "--kind", "relay", "--target", "mark", *explicit]):
+                ap.main()
+            argv = run.call_args.args[0]
+            self.assertEqual(argv.count("--conversation"), 1)
+            self.assertEqual(argv[argv.index("--conversation") + 1], explicit[1] if explicit else "cv-00000000000f")
+            self.assertEqual(argv[-2:], ["--principal", "stmt.mac"])
+
     def test_the_lint_refuses_ids_hashes_rounds_and_lane_words_saying_why(self):
         bad = {"t-40 needs the OAuth click": "a task id", "Merge acme/app#12?": "a pull request or issue id",
                "OK to push a7b81358f7bd?": "a hex id", "Park on the click, round 13?": "a round number",
