@@ -1027,15 +1027,26 @@ class OnWhoseBehalf(unittest.TestCase):
         lorens = self.ask_merge("loren", t)
         self.ask_merge("owner", f"github:acme/app#10@{SHA}")
         view = lambda: json.loads(ap.run(["rule", "merge", t, f"github:acme/app#10@{SHA}", "--for", "ada", "--json"])[0])
+        view_of = lambda target, agent: json.loads(ap.run(["rule", "merge", target, "--for", agent, "--json"])[0])[target]
         got = view()
-        self.assertEqual(got[t]["asked_for"], [{"for": "loren", "name": "Loren", "id": lorens}])
+        self.assertEqual(got[t]["asked_for"], [{"for": "loren", "name": "Loren", "id": lorens, "state": "pending"}])
         self.assertNotIn("asked_for", got[f"github:acme/app#10@{SHA}"], "the owner's own card is the rule's, not someone else's")
         # Only on loom's machine, for the Changes piece: a body's own rule answer never lists other people's cards.
         self.assertNotIn("asked_for", self.api(["rule", "merge", t, "--json"], "owner")["stdout"])
         g = ap.run(["grant", "--kind", "merge", "--target", t, "--for", "ada", "--person", "loren"]).split(":")[0]
         self.assertEqual(g, lorens, "his yes for Loren answers her card")
         self.assertEqual(ap.get(lorens)["state"], "allowed")
-        self.assertNotIn("asked_for", view()[t], "answered: nothing waits on him for her")
+        # Allowed and not yet spent: still listed, as allowed (the page says he said yes for her, never "ask" again).
+        self.assertEqual(view()[t]["asked_for"], [{"for": "loren", "name": "Loren", "id": lorens, "state": "allowed"}])
+        self.assertEqual(self.api(["use", lorens, "--kind", "merge", "--target", t], "loren")["exit"], 0)
+        self.assertNotIn("asked_for", view()[t], "spent: nothing left for her")
+        # Another agent's card, a withdrawn or denied one, or one for someone loom can't name: never listed.
+        t2 = f"github:acme/app#11@{SHA}"
+        dans = self.ask_merge("loren", t2)
+        ap.ui_act({"action": "deny", "fields": {"id": dans}})
+        self.assertNotIn("asked_for", view_of(t2, "ada"))
+        self.ask_merge("loren", t2.replace("#11", "#12"))
+        self.assertNotIn("asked_for", view_of(t2.replace("#11", "#12"), "bo"), "another agent's view")
 
     def test_the_owner_s_answer_for_himself_isn_t_the_answer_to_someone_else_s_request(self):
         t = f"github:acme/app#8@{SHA}"
