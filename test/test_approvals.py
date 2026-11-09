@@ -219,6 +219,15 @@ class Approvals(unittest.TestCase):
         spend = ["use", aid, "--kind", "box-administration", "--target", target]
         self.assertEqual(self.api(spend)["body"]["exit"], 1)
         self.assertEqual(ap.get(aid)["state"], "allowed")
+        with self.assertRaises(PermissionError):
+            ap.run(spend)
+        for name in ("LOOM_BODY_CONVERSATION", "LOOM_BODY_KEY"):
+            with mock.patch.dict(os.environ, {name: "body-proof"}):
+                for call in (args, [*args, "--as", json.dumps(HOUSE)],
+                             spend, [*spend, "--as", json.dumps(HOUSE)]):
+                    with self.assertRaises(PermissionError):
+                        ap.run(call)
+        self.assertEqual(ap.get(aid)["state"], "allowed")
         self.assertEqual(ap.run([*spend, "--as", json.dumps(HOUSE), *AS_OWNER]), f"{aid}: used\n")
         with self.assertRaises(PermissionError):
             ap.run([*spend, "--as", json.dumps(HOUSE), *AS_OWNER])

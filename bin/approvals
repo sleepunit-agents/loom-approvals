@@ -1725,7 +1725,7 @@ def run(argv, caller=None):
     if getattr(a, "on_behalf", "") and not a.as_:
         raise PermissionError("--on-behalf is for a piece on loom's machine acting for a body (--as)")
     body_here = bool(os.environ.get("LOOM_BODY_CONVERSATION") or os.environ.get("LOOM_BODY_KEY"))
-    piece_kind = a.cmd in ("request", "use") and a.kind in (VOUCH_KIND, RESET_KIND)
+    piece_kind = a.cmd in ("request", "use") and a.kind in (VOUCH_KIND, RESET_KIND, "box-administration")
     if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd == "withdraw"):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's
@@ -1733,7 +1733,7 @@ def run(argv, caller=None):
         # is the trust boundary (its bodies share the owner's account and have the host's own escapes; in_a_house,
         # below). Houses and the API are refused outright (--as only from loom's machine).
         raise PermissionError(f"a {getattr(a, 'kind', '') or 'piece'}'s card is the piece's to {a.cmd}, not a body's")
-    if a.cmd == "use" and a.kind in (VOUCH_KIND, RESET_KIND) and not a.as_ and not caller:
+    if a.cmd == "use" and a.kind in (VOUCH_KIND, RESET_KIND, "box-administration") and not a.as_ and not caller:
         # Spent by the piece that applies it, for the agent it was filed for: always said (--as and --on-behalf).
         raise PermissionError(f"a {a.kind} approval is spent by the piece that applies it (--as the agent, --on-behalf owner)")
     if a.cmd == "withdraw":

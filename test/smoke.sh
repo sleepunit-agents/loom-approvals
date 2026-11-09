@@ -38,6 +38,25 @@ gid=${g%%:*}
 [ "$(run rule merge "github:acme/app#1@$sha")" = "ask allowed $gid" ] || fail "the grant isn't what rule reads"
 run use "$gid" --kind merge --target "github:acme/app#1@$sha" | grep -q used || fail "spend the grant"
 
+# Administration cards belong to the controller. Every invocation is a fresh
+# process; decision provenance must survive Allow, consumption and rereading.
+admin_target=box:fixture:administration:adm-0123456789abcdef0123456789abcdef:0123456789abcdef
+admin_as='{"kind":"agent","agent":"agent","house":"runtime"}'
+run request --kind box-administration --target "$admin_target" --what "Repair the test box" --why "Isolated smoke" \
+  2>/dev/null && fail "body filed an administration card"
+admin_out=$(run request --kind box-administration --target "$admin_target" --what "Repair the test box" --why "Isolated smoke" \
+  --as "$admin_as" --on-behalf owner)
+admin_id=${admin_out%%:*}
+echo '{"action":"allow","caller":{"kind":"owner","who":"fixture-owner"},"fields":{"id":"'"$admin_id"'"}}' \
+  | run ui act --json | grep -q '"ok": true' || fail "administration Allow"
+run check "$admin_id" --json --as "$admin_as" | grep -q '"decidedBy": "fixture-owner"' || fail "missing actual decider"
+run use "$admin_id" --kind box-administration --target "$admin_target" 2>/dev/null && fail "body consumed administration"
+[ "$(run check "$admin_id")" = allowed ] || fail "refused body spend changed approval"
+run use "$admin_id" --kind box-administration --target "$admin_target" --as "$admin_as" --on-behalf owner \
+  | grep -q used || fail "runtime consumption"
+run check "$admin_id" --json --as "$admin_as" | grep -q '"decidedBy": "fixture-owner"' || fail "lost decider after consumption"
+[ "$(run check "$admin_id")" = used ] || fail "administration was not consumed"
+
 [ -f "$tmp/piece/data/approvals.json" ] || fail "the store isn't under the piece home"
 [ ! -e "$tmp/home/.local/state/loom-approvals" ] || fail "wrote outside the piece home"
 echo "smoke: ok ($id asked, allowed, spent once; store in \$LOOM_PIECE_HOME/data)"
