@@ -205,6 +205,67 @@ class Approvals(unittest.TestCase):
         ap.ui_act({"action": "deny", "fields": {"id": aid2}, "caller": {"kind": "owner", "who": "Not A Slug"}})
         self.assertNotIn("by", ap.get(aid2))
 
+    def test_box_administration_is_filed_and_spent_only_by_the_runtime(self):
+        target = "adm-0123456789abcdef:box-one"
+        args = ["request", "--kind", "box-administration", "--target", target,
+                "--what", "Repair the resolver", "--why", "The owner requested repair"]
+        self.assertEqual(self.api(args)["body"]["exit"], 1)
+        aid = ap.run([*args, "--as", json.dumps(HOUSE), *AS_OWNER]).split(":")[0]
+        again = ap.run([*args, "--as", json.dumps({**HOUSE, "house": "h-9"}), *AS_OWNER])
+        self.assertTrue(again.startswith(aid + ":"))
+        self.assertEqual(len(ap.recent()), 1)
+        self.assertTrue(ap.ui_act({"action": "allow", "fields": {"id": aid},
+                                  "caller": {"kind": "owner", "who": "jonathan-barket"}})["ok"])
+        spend = ["use", aid, "--kind", "box-administration", "--target", target]
+        self.assertEqual(self.api(spend)["body"]["exit"], 1)
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        with self.assertRaises(PermissionError):
+            ap.run(spend)
+        for name in ("LOOM_BODY_CONVERSATION", "LOOM_BODY_KEY"):
+            with mock.patch.dict(os.environ, {name: "body-proof"}):
+                for call in (args, [*args, "--as", json.dumps(HOUSE)],
+                             spend, [*spend, "--as", json.dumps(HOUSE)]):
+                    with self.assertRaises(PermissionError):
+                        ap.run(call)
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        self.assertEqual(ap.run([*spend, "--as", json.dumps(HOUSE), *AS_OWNER]), f"{aid}: used\n")
+        with self.assertRaises(PermissionError):
+            ap.run([*spend, "--as", json.dumps(HOUSE), *AS_OWNER])
+
+    def test_administration_request_reconciles_terminal_answers_without_another_card(self):
+        for outcome in ("deny", "used", "expired"):
+            args = ["request", "--kind", "box-administration", "--target", "scope:" + outcome,
+                    "--what", "Inspect the fixture", "--why", "Isolated test",
+                    "--as", json.dumps(HOUSE), *AS_OWNER]
+            aid = ap.run(args).split(":")[0]
+            ap.answer(aid, "deny" if outcome == "deny" else "allow", by="jonathan-barket")
+            if outcome == "used":
+                ap.run(["use", aid, "--kind", "box-administration", "--target", "scope:" + outcome,
+                        "--as", json.dumps(HOUSE), *AS_OWNER])
+            if outcome == "expired":
+                with ap.Store() as store:
+                    store.d["approvals"][aid]["expires"] = "2000-01-01T00:00:00Z"
+                    store.save()
+            before = len(ap.recent())
+            self.assertEqual(ap.run(args).split(":")[0], aid)
+            self.assertEqual(len(ap.recent()), before)
+
+    def test_check_reports_actual_decider_even_after_consumption_without_inventing_one(self):
+        aid = self.ask()
+        check = lambda: json.loads(self.api(["check", aid, "--json"])["body"]["stdout"])
+        self.assertNotIn("decidedBy", check())
+        self.assertTrue(ap.ui_act({"action": "allow", "fields": {"id": aid},
+                                  "caller": {"kind": "owner", "who": "jonathan-barket"}})["ok"])
+        self.assertEqual(check()["decidedBy"], "jonathan-barket")
+        self.assertEqual(self.api(["use", aid, "--kind", "github-write",
+                                   "--target", "acme/app:octocat"])["body"]["exit"], 0)
+        self.assertEqual(check()["decidedBy"], "jonathan-barket")
+        self.assertEqual(check()["state"], "used")
+        # A legacy decision with no authenticated member stays unnamed.
+        other = self.ask(target="acme/other:octocat")
+        ap.answer(other, "allow")
+        self.assertNotIn("decidedBy", json.loads(self.api(["check", other, "--json"])["body"]["stdout"]))
+
     def test_deny_and_expiry(self):
         aid = self.ask()
         ap.ui_act({"action": "deny", "fields": {"id": aid}})
