@@ -232,6 +232,24 @@ class Approvals(unittest.TestCase):
         with self.assertRaises(PermissionError):
             ap.run([*spend, "--as", json.dumps(HOUSE), *AS_OWNER])
 
+    def test_administration_request_reconciles_terminal_answers_without_another_card(self):
+        for outcome in ("deny", "used", "expired"):
+            args = ["request", "--kind", "box-administration", "--target", "scope:" + outcome,
+                    "--what", "Inspect the fixture", "--why", "Isolated test",
+                    "--as", json.dumps(HOUSE), *AS_OWNER]
+            aid = ap.run(args).split(":")[0]
+            ap.answer(aid, "deny" if outcome == "deny" else "allow", by="jonathan-barket")
+            if outcome == "used":
+                ap.run(["use", aid, "--kind", "box-administration", "--target", "scope:" + outcome,
+                        "--as", json.dumps(HOUSE), *AS_OWNER])
+            if outcome == "expired":
+                with ap.Store() as store:
+                    store.d["approvals"][aid]["expires"] = "2000-01-01T00:00:00Z"
+                    store.save()
+            before = len(ap.recent())
+            self.assertEqual(ap.run(args).split(":")[0], aid)
+            self.assertEqual(len(ap.recent()), before)
+
     def test_check_reports_actual_decider_even_after_consumption_without_inventing_one(self):
         aid = self.ask()
         check = lambda: json.loads(self.api(["check", aid, "--json"])["body"]["stdout"])

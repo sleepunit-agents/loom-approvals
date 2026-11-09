@@ -629,6 +629,12 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
         for a in s.d["approvals"].values():
+            # An administrative scope is immutable and never reused. A lost filing
+            # reply must recover its original answer even after denial/use/expiry;
+            # a new owner decision requires a new runtime scope and target.
+            if kind == "box-administration" and a["kind"] == kind and a["target"] == target \
+                    and may_spend(a["who"], who) and same_principal(a, p):
+                return {**a, "state": state_of(a)}
             if a["kind"] == kind and a["target"] == target and may_spend(a["who"], who) and same_principal(a, p) \
                     and state_of(a) in ("pending", "allowed"):
                 # A caller that now says it plainly: a pending card takes the plain words (the owner hasn't read it yet).
