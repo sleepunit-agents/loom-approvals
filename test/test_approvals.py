@@ -1020,6 +1020,23 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertEqual(self.rule("loren", t), f"ask allowed {g2}")
         self.assertEqual(self.api(["use", g2, "--kind", "merge", "--target", t], "loren")["exit"], 0)
 
+    def test_the_changes_view_says_whom_else_a_merge_waits_on_and_its_yes_answers_that_card(self):
+        # t-1956: the Changes piece reads rule merge --for <agent> --json as the owner's own work; a merge the agent
+        # asked for Loren isn't, so each target also names who else it waits on, and grant --person answers that card.
+        t = f"github:acme/app#9@{SHA}"
+        lorens = self.ask_merge("loren", t)
+        self.ask_merge("owner", f"github:acme/app#10@{SHA}")
+        view = lambda: json.loads(ap.run(["rule", "merge", t, f"github:acme/app#10@{SHA}", "--for", "ada", "--json"])[0])
+        got = view()
+        self.assertEqual(got[t]["asked_for"], [{"for": "loren", "name": "Loren", "id": lorens}])
+        self.assertNotIn("asked_for", got[f"github:acme/app#10@{SHA}"], "the owner's own card is the rule's, not someone else's")
+        # Only on loom's machine, for the Changes piece: a body's own rule answer never lists other people's cards.
+        self.assertNotIn("asked_for", self.api(["rule", "merge", t, "--json"], "owner")["stdout"])
+        g = ap.run(["grant", "--kind", "merge", "--target", t, "--for", "ada", "--person", "loren"]).split(":")[0]
+        self.assertEqual(g, lorens, "his yes for Loren answers her card")
+        self.assertEqual(ap.get(lorens)["state"], "allowed")
+        self.assertNotIn("asked_for", view()[t], "answered: nothing waits on him for her")
+
     def test_the_owner_s_answer_for_himself_isn_t_the_answer_to_someone_else_s_request(self):
         t = f"github:acme/app#8@{SHA}"
         g = ap.run(["grant", "--kind", "merge", "--target", t, "--for", "ada", "--by", "jonathan-barket"]).split(":")[0]

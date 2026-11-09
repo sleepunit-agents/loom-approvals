@@ -82,7 +82,10 @@ for that person, or it asks.
 - **`rule merge`** reads the standing rules only for the owner's own work. For
   a person, it reads the **grants** the owner set for them (most specific
   wins, as for rules), and with none it asks. For someone loom can't name, it
-  asks.
+  asks. Asked on loom's machine for an agent (`--for`, the Changes piece's
+  view), each target also lists `asked_for`: the people the agent has a pending
+  merge card for, newest first (`{for, name, id}`), so the page can say whom
+  it's for and answer with `grant --person` (t-1956).
 - **A card names whom it's for**, in the piece's words, first: "Merge
   on-pond#220 for Loren?", or "For Loren: <the ask>" for any other kind. The
   body's own question follows in the sheet.
