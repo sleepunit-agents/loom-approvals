@@ -150,7 +150,7 @@ def iso(t):
 
 # Kinds only a piece on loom's machine files, for the body it acts for (--as): never a body over the API, so a body
 # can't put its own words on a card the owner reads as the piece's.
-PIECE_KINDS = {"local-wake", "vouch-wake", "principal-reset"}
+PIECE_KINDS = {"local-wake", "vouch-wake", "principal-reset", "box-administration"}
 
 # Access to one of loom's pieces for an agent (loom docs/specs/agent-runtime.md, "6. Permissions"; t-1970): a body asks
 # with --kind grant --target <piece>:<agent>[:<path>,<path>], and the household owner's Allow is applied by the runtime
@@ -680,7 +680,8 @@ def spend_card(caller, aid):
     if not may_spend(a["who"], who):
         raise PermissionError(f"{aid} isn't {who['agent']}'s to read here; check {aid} gives its state")
     return {"id": a["id"], "agent": a["who"].get("agent"), "for": for_of(a), "state": a["state"], "kind": a["kind"], "target": a["target"],
-            "expires": a.get("expires") if a["state"] == "allowed" else None}
+            "expires": a.get("expires") if a["state"] == "allowed" else None,
+            **({"decidedBy": a["by"]} if a.get("by") else {})}
 
 
 def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=None, unstated=False):
@@ -1179,7 +1180,7 @@ STATE_WORDS = {"pending": "Waiting on you", "allowed": "Allowed", "used": "Used"
 # The kinds the clock piece files, plus any the instance names (APPROVALS_KINDS).
 KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent", "merge": "A merge",
               "grant": "Access to a piece", "vouch-wake": "Scheduled jobs counted as yours",
-              "principal-reset": "A conversation counted as yours"}
+              "principal-reset": "A conversation counted as yours", "box-administration": "Scoped work on a box"}
 try:
     _extra = json.loads(setting("APPROVALS_KINDS", "{}"))
     KIND_WORDS.update({k: v for k, v in _extra.items() if KIND.match(str(k)) and isinstance(v, str)} if isinstance(_extra, dict) else {})

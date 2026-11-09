@@ -301,3 +301,17 @@ second spend and a wrong target, the API, the page.
 ## License
 
 AGPL-3.0-or-later, like loom and its other pieces. See [LICENSE](LICENSE).
+
+### Scoped box administration integration
+
+The runtime files and consumes `box-administration` approvals locally with
+`--as`, for the verified requesting principal. A body cannot file or spend this
+kind directly. Its target identifies the runtime's immutable scope and box;
+the runtime must verify the full scope, box ownership, current conversation
+authority and lease expiry before enabling commands.
+
+An authorized `check ID --json` includes `decidedBy` when the recorded decision
+names its authenticated household member, including after consumption. An old
+or unnamed decision omits the field; callers must never infer a member from
+absence. This is decision provenance, not a grant of box access. These approval
+primitives alone do not enable administrative execution.
