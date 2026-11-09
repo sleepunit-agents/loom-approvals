@@ -1835,16 +1835,17 @@ def forward(piece, argv):
 
 def main():
     args = sys.argv[1:]
+    # Local and house bodies carry the same conversation provenance. It is a display link,
+    # never authority: the verified principal still decides what the request may do.
+    conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
+    if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.fullmatch(conv):
+        args = [*args, "--conversation", conv]
     # In a house the store isn't here: it's loom's machine's, through the piece API, as the
     # house's own token (like the clock). On loom's machine the user account is the boundary:
     # its bodies have the host's own escapes anyway; approvals bind houses.
     if in_a_house():
         if args[:1] in (["ui"], ["api"]):
             sys.exit("approvals: the piece runs on loom's machine, not in a house")
-        # A body's request names its conversation (the runtime sets LOOM_BODY_CONVERSATION), unless it says one itself.
-        conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
-        if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.fullmatch(conv):
-            args = [*args, "--conversation", conv]
         # On whose behalf (t-1943): the runtime's statement, as piece-call adds it; a typed one is dropped.
         args, typed = take_principal(args)
         st = (fetch_statement(conv) if CONVERSATION.fullmatch(conv) and args else None) or typed
