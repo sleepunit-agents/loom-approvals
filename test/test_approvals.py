@@ -267,6 +267,9 @@ class Approvals(unittest.TestCase):
         self.assertIn("--on-behalf", str(e.exception))
         with self.assertRaises(PermissionError):
             ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", ""])
+        # "-" (the runtime's word for a caller that proved no conversation) is someone loom can't name: not the owner's.
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "-"])
         self.assertEqual(ap.get(aid)["state"], "allowed", "a refused spend leaves it allowed")
         self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "owner"]), f"{aid}: used\n")
 
