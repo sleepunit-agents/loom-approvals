@@ -1589,6 +1589,16 @@ class Grants(unittest.TestCase):
         ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
         self.assertEqual(ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps({"kind": "agent", "agent": "ada"})]), f"{aid}: used\n")
 
+    def test_one_only_he_answers_stays_on_his_page_wherever_it_was_asked(self):
+        # loom t-2084: conversation-asked approvals are left to loom's Inbox, except those only the household owner answers.
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned([
+            "request", "--kind", "grant", "--target", "tasks:mark", "--ask", "Give Mark access to Tasks?", "--why", "He asked.",
+            "--if-yes", "He can.", "--if-no", "He can't.", "--conversation", "cv-0123456789ab"])}})
+        self.assertEqual(r["body"]["exit"], 0, r)
+        aid = r["body"]["stdout"].split(":")[0]
+        self.assertIn(aid, json.dumps(ap.ui_page({"path": "", "caller": OWNER})))
+        self.assertNotIn(aid, json.dumps(ap.ui_page({"path": "", "caller": {"kind": "owner", "agents": ["ada"]}})))
+
     def test_state_carries_a_grant_s_target_for_core(self):
         aid = self.ask()
         r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})

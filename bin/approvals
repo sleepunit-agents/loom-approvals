@@ -1811,12 +1811,14 @@ def ui_page(req):
         return {"title": "Not found", "sections": []}
     # One asked in a conversation is answered in loom's Inbox, which shows it only to whom it's for (a Comms thread's
     # member: loom t-2084); this page can't tell whose a conversation is, so it names how many and leaves their words out.
+    # The household owner still sees, here, every one only he answers (a grant, a vouch, a reset, a host step, a write-off).
+    owner = is_owner(req)
     every = recent()
-    rows = [a for a in every if not a.get("conversation")]
-    elsewhere = sum(1 for a in every if a.get("conversation") and a["state"] == "pending")
+    shown = lambda a: not a.get("conversation") or (owner and a["kind"] in OWNER_ANSWERED)
+    rows = [a for a in every if shown(a)]
+    elsewhere = sum(1 for a in every if not shown(a) and a["state"] == "pending")
     pending = [a for a in rows if a["state"] == "pending"]
     past = [a for a in rows if a["state"] != "pending"][:60]
-    owner = is_owner(req)
     if owner:
         with Store() as s:
             proj_rules = any(r["scope"].startswith("project:") for r in [*s.rules(), *s.grants()])
