@@ -524,23 +524,37 @@ def may_spend(asked, who):
     return svc is None or svc == service_of(asked)
 
 
-def verify_statement(statement):
-    """The runtime's word on a statement (`loom runtime principal --verify`): {agent, for, owner, people} or None."""
+def caller_house(caller):
+    """The house the piece API says a call came from (core's word, from the house's own token): None for a call from
+    no house, False for one whose house id isn't one (verify_statement then says no: never checked as if houseless)."""
+    if not isinstance(caller, dict) or caller.get("kind") != "agent" or caller.get("house") is None:
+        return None
+    h = caller["house"]
+    return h if isinstance(h, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", h) else False
+
+
+def verify_statement(statement, house=None):
+    """The runtime's word on a statement (`loom runtime principal --verify`): {agent, for, owner, people} or None. From
+    a house (t-2136), only when that house runs the body of the statement's conversation (`--house`): a statement is a
+    bearer word for its 5 minutes, so one another conversation's body was shown never speaks for it from elsewhere."""
+    if house is False:
+        return None
     cmd = setting("APPROVALS_PRINCIPAL", "loom runtime principal")
     try:
-        out = subprocess.run([*shlex.split(cmd), "--verify"], input=statement, capture_output=True, text=True, timeout=10)
+        out = subprocess.run([*shlex.split(cmd), "--verify", *(["--house", house] if house else [])], input=statement,
+                             capture_output=True, text=True, timeout=10)
         r = json.loads(out.stdout or "{}")
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return r if isinstance(r, dict) and r.get("ok") is True and out.returncode == 0 else None
 
 
-def principal_of(who, statement=None, local=False):
+def principal_of(who, statement=None, local=False, house=None):
     """On whose behalf `who` acts: {"for": "owner" | slug | "?", "people": [slugs]}. From the runtime's signed statement
     for this agent, else (a call on loom's machine itself, `local`) APPROVALS_LOCAL_PRINCIPAL, else "?". A statement
     for another agent, or one that doesn't verify, is "?": never the owner by default."""
     if statement:
-        v = verify_statement(statement)
+        v = verify_statement(statement, house)
         if not v or v.get("agent") != who.get("agent"):
             return {"for": UNKNOWN, "people": []}
         people = [p for p in (v.get("people") or []) if isinstance(p, str) and PERSON.fullmatch(p)][:20]
@@ -620,7 +634,7 @@ def principal_for_call(caller, who, statement=None, acting_for=False, on_behalf=
         m = re.fullmatch(r"[-?]:([a-z0-9-]+(?:,[a-z0-9-]+){0,19})", on_behalf)
         people = sorted({x for x in m.group(1).split(",") if PERSON.fullmatch(x)}) if m else []
         return {"for": UNKNOWN, "people": people}
-    return principal_of(who, statement, local=caller is None)
+    return principal_of(who, statement, local=caller is None, house=caller_house(caller))
 
 
 def principal_words(p):
@@ -641,7 +655,7 @@ def proven_conversation(caller, who, conversation, statement=None, acting_for=Fa
         return None
     if acting_for or (caller is None and not LOCAL_BODY):
         return conversation
-    v = verify_statement(statement) if statement else None
+    v = verify_statement(statement, caller_house(caller)) if statement else None
     if not v or v.get("agent") != who.get("agent"):
         return None
     cv = v.get("conversation")

@@ -33,8 +33,15 @@ exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), ap.__dict__)
 HOUSE = {"kind": "agent", "agent": "ada", "house": "h-7"}
 
 
-def fake_verify(statement):
-    """The runtime's --verify, for tests: "S:<agent>:<for>" verifies; for is owner, a slug, ? (unknown) or a,b (several)."""
+VERIFIED_HOUSES = []
+
+
+def fake_verify(statement, house=None):
+    """The runtime's --verify, for tests: "S:<agent>:<for>" verifies; for is owner, a slug, ? (unknown) or a,b (several).
+    The house it's asked from (the caller's, t-2136) is recorded; a house named "h-elsewhere" isn't its body's."""
+    VERIFIED_HOUSES.append(house)
+    if house == "h-elsewhere":
+        return None
     parts = str(statement).split(":")
     if len(parts) not in (3, 4) or parts[0] != "S":
         return None
@@ -1432,6 +1439,25 @@ sys.exit(int(os.environ.get("RT_EXIT", "0")))
         with self.answer({**good, "for": "jonathan", "owner": True}):
             self.assertEqual(ap.principal_of({"agent": "ada"}, "s")["for"], ap.OWNER)
             self.assertEqual(ap.principal_of({"agent": "bo"}, "s")["for"], ap.UNKNOWN)
+
+    def test_from_a_house_the_runtime_is_told_which_house_asks(self):
+        # t-2136: a statement holds only from the house running its conversation's body, so the runtime is told the
+        # caller's house (core's word, from its token), never one the body typed; with no house, nothing is added.
+        good = {"ok": True, "agent": "ada", "conversation": "cv-0123456789ab", "for": "jonathan", "owner": True, "people": []}
+        with self.answer(good):
+            self.assertEqual(ap.principal_for_call(HOUSE, {"agent": "ada"}, "s")["for"], ap.OWNER)
+            self.assertEqual(self.calls()[-1]["argv"], ["--verify", "--house", "h-7"])
+            ap.principal_for_call({"kind": "agent", "agent": "ada"}, {"agent": "ada"}, "s")
+            self.assertEqual(self.calls()[-1]["argv"], ["--verify"])
+            n = len(self.calls())
+            self.assertEqual(ap.principal_for_call({**HOUSE, "house": "h-7 --x"}, {"agent": "ada"}, "s")["for"], ap.UNKNOWN,
+                             "a house id that isn't one is no, never checked as if from no house")
+            self.assertEqual(len(self.calls()), n, "and never passed on")
+            self.assertEqual(ap.proven_conversation(HOUSE, {"agent": "ada"}, "cv-0123456789ab", "s"), "cv-0123456789ab")
+            self.assertEqual(self.calls()[-1]["argv"], ["--verify", "--house", "h-7"])
+        # The runtime's no (its body isn't in that house) is unknown, so the rules ask.
+        with self.answer({"ok": False, "reason": "not from the house of its conversation's body"}, 1):
+            self.assertEqual(ap.principal_for_call(HOUSE, {"agent": "ada"}, "s")["for"], ap.UNKNOWN)
 
     def test_a_body_fetches_its_own_statement_from_the_runtime(self):
         # On loom's machine (a local body): the setting's command.
