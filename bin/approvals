@@ -290,6 +290,9 @@ def owner_lines(a):
         return {"if_yes": f"{name_of(r['agent'])}'s work there counts as yours from now on, with your standing permissions. "
                           "It starts afresh: what it heard before is set aside.",
                 "if_no": "Nothing changes: it stays no one's, and asks you for anything that needs you."}
+    if k == HOST_KIND and host_of(t):
+        return {"if_yes": f"loom's runtime runs exactly {t} once, through its fixed host steps, and the body is told the result.",
+                "if_no": "Nothing runs on loom's machine."}
     if k == WRITEOFF_KIND and writeoff_of(t):
         w = writeoff_of(t)
         return {"if_yes": f"{name_of(w['agent'])}'s work there goes on, on the next box it may use, told to check what it already did. "

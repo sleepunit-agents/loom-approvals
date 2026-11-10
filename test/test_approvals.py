@@ -2074,9 +2074,6 @@ class StandingJobs(unittest.TestCase):
         with self.assertRaises(ValueError):
             ap.set_rule("merge", "github:acme/*", "do", "jo")
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class HostSteps(unittest.TestCase):
     """Steps on loom's machine (t-2104): the owner's standing rules per verb, the runtime's tell and spend, his answer."""
@@ -2181,6 +2178,7 @@ class HostSteps(unittest.TestCase):
         self.assertEqual(ask["text"], "Restart loom-http on loom's machine?")
         self.assertIn("Can I restart loom-http", ask["details"])
         self.assertIn("exactly restart:loom-http.service once", ask["fine"])
+        self.assertEqual(ask["if_no"], "Nothing runs on loom's machine.")
         # An agent's owner who isn't the household's can't answer it; nor no caller.
         for c in ({"kind": "owner", "who": "sam", "agents": ["ada"]}, None):
             self.assertFalse(ap.ui_act({"action": "allow", "caller": c, "fields": {"id": aid}})["ok"])
@@ -2206,3 +2204,7 @@ class HostSteps(unittest.TestCase):
         r = self.api(["request", "--kind", "host", "--target", "deploy-loom:fix", "--what", "deploy", "--why", "fix", "--principal", "S:ada:@loren"])
         self.assertEqual(r["exit"], 1)
         self.assertEqual(self.api(["request", "--kind", "host", "--target", "shell:ls", "--what", "x", "--why", "y"])["exit"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
