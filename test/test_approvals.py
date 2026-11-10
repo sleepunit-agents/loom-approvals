@@ -20,7 +20,7 @@ SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "approvals"
 
 # Nothing here reaches a real store, a real piece home or a house's forwarding.
 _sandbox = tempfile.TemporaryDirectory()
-for k in ("LOOM_PIECE_HOME", "HOUSE_ID", "APPROVALS_LOCAL_AGENT"):
+for k in ("LOOM_PIECE_HOME", "HOUSE_ID", "APPROVALS_LOCAL_AGENT", "LOOM_BODY_CONVERSATION", "LOOM_BODY_KEY"):
     os.environ.pop(k, None)
 os.environ["APPROVALS_DIR"] = str(Path(_sandbox.name) / "unused")
 os.environ["APPROVALS_KINDS"] = json.dumps({"github-write": "A GitHub write"})
@@ -968,7 +968,7 @@ class OnWhoseBehalf(unittest.TestCase):
         # On the page, beside his own rules, in words; a member who owns some agents doesn't see either.
         rules = next(x for x in ap.ui_page({"path": "", "caller": OWNER})["sections"] if x["id"] == "rules")
         panels = {b["title"]: b for b in rules["blocks"]}
-        self.assertEqual(list(panels), ["Merging, for you", "Merging, for other people", "Standing jobs"])
+        self.assertEqual(list(panels), ["Merging, for you", "Merging, for other people", "Steps on loom's machine", "Standing jobs"])
         row = panels["Merging, for other people"]["rows"][0]
         self.assertEqual((row["label"], row["value"]), ("Loren: Everything in onterris", "Just do it"))
         self.assertEqual(row["choice"]["fields"], {"person": "loren", "scope": "github:onterris/*", "kind": "merge"})
@@ -2073,6 +2073,138 @@ class StandingJobs(unittest.TestCase):
         # And a rule edit never writes the job away while it's unreadable.
         with self.assertRaises(ValueError):
             ap.set_rule("merge", "github:acme/*", "do", "jo")
+
+
+class HostSteps(unittest.TestCase):
+    """Steps on loom's machine (t-2104): the owner's standing rules per verb, the runtime's tell and spend, his answer."""
+
+    AS = ["--as", json.dumps(HOUSE), "--on-behalf", "owner"]
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(ap, "STATE", Path(self.td.name))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.td.cleanup()
+
+    def api(self, argv, caller=HOUSE):
+        return ap.api_answer({"caller": caller, "path": "run", "body": {"argv": owned(argv)}})["body"]
+
+    def set(self, scope, tier):
+        r = ap.ui_act({"action": "host-rule-add", "caller": OWNER, "fields": {"scope": scope, "tier": tier}})
+        self.assertTrue(r["ok"], r)
+
+    def rule(self, target, extra=()):
+        return ap.run(["rule", "host", target, *self.AS, *extra])[0]
+
+    def test_no_rule_is_none_so_the_runtime_uses_the_verb_s_own_tier(self):
+        self.assertEqual(self.rule("restart:loom-http.service"), "none\n")
+        self.assertEqual(self.rule("read:allocator-shadow.jsonl"), "none\n")
+
+    def test_most_specific_wins_then_strictest(self):
+        self.set("restart", "tell")
+        self.set("restart:loom-piece-*", "do")
+        self.set("restart:loom-http.service", "ask")
+        self.set("host:pieces-update:*", "do")
+        self.assertEqual(self.rule("restart:loom-http.service"), "ask\n")
+        self.assertEqual(self.rule("restart:loom-piece-tasks.service"), "do\n")
+        self.assertEqual(self.rule("restart:loom-http-lan.service"), "tell\n")
+        self.assertEqual(self.rule("pieces-update:runtime"), "do\n")
+        self.assertEqual(self.rule("deploy-loom:fix"), "none\n")
+        # The owner's rules, for his own work only: anyone else's asks.
+        self.assertEqual(ap.run(["rule", "host", "pieces-update:runtime", "--as", json.dumps(HOUSE), "--on-behalf", "loren"])[0], "ask\n")
+        # Over the API a body reads its own tier, as the owner's own work only.
+        self.assertEqual(self.api(["rule", "host", "pieces-update:runtime"])["stdout"], "do\n")
+        self.assertEqual(self.api(["rule", "host", "pieces-update:runtime", "--principal", "S:ada:@loren"])["stdout"], "ask\n")
+
+    def test_bad_scopes_and_targets_are_refused(self):
+        for bad in ("rm -rf", "host:shell", "restart:../x", "host:read:../../etc/passwd", "unknown:x", "host:restart:.."):
+            r = ap.ui_act({"action": "host-rule-add", "caller": OWNER, "fields": {"scope": bad, "tier": "do"}})
+            self.assertFalse(r["ok"], bad)
+        for bad in ("restart", "shell:ls", "read:../secrets", "restart:a b"):
+            with self.assertRaises(ValueError):
+                ap.run(["rule", "host", bad, *self.AS])
+        # The merge form never makes a host rule, and a merge scope never answers a host step.
+        self.assertFalse(ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "host:restart", "kind": "host", "tier": "do"}})["ok"])
+        ap.ui_act({"action": "rule-add", "caller": OWNER, "fields": {"scope": "host:restart", "tier": "do"}})
+        self.assertEqual(self.rule("restart:loom-http.service"), "none\n")
+
+    def test_only_the_owner_sets_them_and_never_as_a_grant(self):
+        member = {"kind": "owner", "who": "sam", "agents": ["ada"]}
+        for c in (member, {"kind": "agent", "agent": "ada"}, None):
+            self.assertFalse(ap.ui_act({"action": "host-rule-add", "caller": c, "fields": {"scope": "restart", "tier": "do"}})["ok"])
+        with self.assertRaises(ValueError):
+            ap.set_grant("loren", "host", "host:restart", "do", "jo")
+        self.set("deploy-loom", "tell")
+        panel = next(b for b in ap.ui_page({"path": "", "caller": OWNER})["sections"][1]["blocks"] if b.get("title") == "Steps on loom's machine")
+        self.assertEqual((panel["rows"][0]["label"], panel["rows"][0]["value"]), ("Deploying loom: any", "Tell me after"))
+        # No rule removes it.
+        r = ap.ui_act({"action": "rule", "caller": OWNER, "fields": {"scope": "host:deploy-loom", "kind": "host", "tier": "none"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.rule("deploy-loom:fix"), "none\n")
+
+    def test_a_rules_file_that_can_t_be_read_asks_even_for_a_read(self):
+        (Path(self.td.name) / "rules.json").write_text("{not json")
+        self.assertEqual(self.rule("read:allocator-shadow.jsonl"), "ask\n")
+
+    def test_tell_is_the_runtime_s_only_and_only_under_tell_or_do(self):
+        self.set("pieces-update", "tell")
+        # A body over the API, or one on loom's machine, never files a notice that a step ran.
+        self.assertEqual(self.api(["tell", "--kind", "host", "--target", "pieces-update:runtime", "--what", "x"])["exit"], 1)
+        self.assertEqual(self.api(["tell", "--kind", "host", "--target", "pieces-update:runtime", "--what", "x", *self.AS])["exit"], 1)
+        with mock.patch.dict(os.environ, {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}):
+            with self.assertRaises(PermissionError):
+                ap.run(["tell", "--kind", "host", "--target", "pieces-update:runtime", "--what", "x", *self.AS])
+        out = ap.run(["tell", "--kind", "host", "--target", "pieces-update:runtime", "--what", "ada ran pieces-update:runtime", *self.AS])
+        self.assertIn("Ada: update loom's runtime piece on loom's machine", out)
+        # Not under an ask rule, no rule, or for anyone else.
+        for t in ("restart:loom-http.service", "deploy-loom:x"):
+            with self.assertRaises(PermissionError):
+                ap.run(["tell", "--kind", "host", "--target", t, "--what", "x", *self.AS])
+        with self.assertRaises(PermissionError):
+            ap.run(["tell", "--kind", "host", "--target", "pieces-update:runtime", "--what", "x", "--as", json.dumps(HOUSE), "--on-behalf", "loren"])
+
+    def file(self, target="restart:loom-http.service"):
+        r = self.api(["request", "--kind", "host", "--target", target, "--ask", "Can I restart loom-http to pick up the fix?",
+                      "--why", "The new runtime needs it.", "--if-yes", "I restart it once.", "--if-no", "I leave it running."])
+        self.assertEqual(r["exit"], 0, r)
+        return r["stdout"].split(":")[0]
+
+    def test_the_card_names_the_step_only_the_owner_answers_only_the_runtime_spends(self):
+        aid = self.file()
+        ask = next(x for x in ap.ui_manifest()["asks"] if x["text"].startswith("Restart"))
+        self.assertEqual(ask["text"], "Restart loom-http on loom's machine?")
+        self.assertIn("Can I restart loom-http", ask["details"])
+        self.assertIn("exactly restart:loom-http.service once", ask["fine"])
+        self.assertEqual(ask["if_no"], "Nothing runs on loom's machine.")
+        # An agent's owner who isn't the household's can't answer it; nor no caller.
+        for c in ({"kind": "owner", "who": "sam", "agents": ["ada"]}, None):
+            self.assertFalse(ap.ui_act({"action": "allow", "caller": c, "fields": {"id": aid}})["ok"])
+        self.assertTrue(ap.ui_act({"action": "allow", "caller": OWNER, "fields": {"id": aid}})["ok"])
+        # A body's own use never burns his yes: over the API, or on loom's machine.
+        self.assertEqual(self.api(["use", aid, "--kind", "host", "--target", "restart:loom-http.service"])["exit"], 1)
+        with mock.patch.dict(os.environ, {"LOOM_BODY_KEY": "k"}):
+            with self.assertRaises(PermissionError):
+                ap.run(["use", aid, "--kind", "host", "--target", "restart:loom-http.service", *self.AS])
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        # The runtime spends it, for exactly that step, once.
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "host", "--target", "restart:loom-http-lan.service", *self.AS])
+        self.assertEqual(ap.run(["use", aid, "--kind", "host", "--target", "restart:loom-http.service", *self.AS]), f"{aid}: used\n")
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "host", "--target", "restart:loom-http.service", *self.AS])
+
+    def test_no_card_for_a_step_the_rules_answer_or_for_anyone_else(self):
+        self.set("restart:loom-http.service", "do")
+        r = self.api(["request", "--kind", "host", "--target", "restart:loom-http.service", "--what", "restart", "--why", "fix"])
+        self.assertEqual(r["exit"], 1)
+        self.assertIn("no card was filed", r["stderr"])
+        r = self.api(["request", "--kind", "host", "--target", "deploy-loom:fix", "--what", "deploy", "--why", "fix", "--principal", "S:ada:@loren"])
+        self.assertEqual(r["exit"], 1)
+        self.assertEqual(self.api(["request", "--kind", "host", "--target", "shell:ls", "--what", "x", "--why", "y"])["exit"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
