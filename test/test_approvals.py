@@ -265,6 +265,8 @@ class Approvals(unittest.TestCase):
         with self.assertRaises(PermissionError) as e:
             ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)])
         self.assertIn("--on-behalf", str(e.exception))
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", ""])
         self.assertEqual(ap.get(aid)["state"], "allowed", "a refused spend leaves it allowed")
         self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "owner"]), f"{aid}: used\n")
 
