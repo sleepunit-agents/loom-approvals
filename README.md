@@ -84,8 +84,10 @@ for that person, or it asks.
   answer with `ok: true` and exit 0. No statement, one that doesn't verify, or
   one for another agent: someone loom can't name, **never the owner**. A
   statement lasts 5 minutes and the runtime refuses one whose conversation has
-  heard someone new since; within that, it's a bearer's for that agent (the
-  runtime's README states the limit: one agent's bodies share a house). A
+  heard someone new since. From a house the piece also hands the runtime the
+  caller's house (`--verify --house`, core's word from the house's token), and
+  the statement holds only from the house running its conversation's body, so
+  one shown to another conversation's body never speaks for it (t-2136). A
   person whose slug is `owner` is that person, never the owner: unknown here. A body the runtime runs on loom's machine (a local wake)
   fetches its own; any other call on loom's machine is the owner's
   (APPROVALS_LOCAL_PRINCIPAL, `owner` or `unknown`).
