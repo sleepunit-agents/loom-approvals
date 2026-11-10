@@ -89,6 +89,11 @@ for that person, or it asks.
   person whose slug is `owner` is that person, never the owner: unknown here. A body the runtime runs on loom's machine (a local wake)
   fetches its own; any other call on loom's machine is the owner's
   (APPROVALS_LOCAL_PRINCIPAL, `owner` or `unknown`).
+- **`--conversation`** puts a pending card in that conversation's Comms thread
+  (loom's "Asks inline"). A body names only its own (t-2117): the conversation
+  its verified statement is for, by the same agent. Any other it names is
+  dropped, and the card is filed in no thread. A piece on loom's machine
+  acting for a body (`--as`), or loom's machine's own account, says it itself.
 - **`rule merge`** reads the standing rules only for the owner's own work. For
   a person, it reads the **grants** the owner set for them (most specific
   wins, as for rules), and with none it asks. For someone loom can't name, it
