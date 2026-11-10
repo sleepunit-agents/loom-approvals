@@ -1049,6 +1049,19 @@ def rule_answer(caller, kind, targets, agent=None, as_json=False, statement=None
     # APPROVALS_LOCAL_PRINCIPAL; a local body is never the owner for being here.
     p = principal_for_call(caller, who, statement)
     res = rules_for(who["agent"], kind, targets, p["for"], p.get("people") or ())
+    if agent and p["for"] == OWNER:
+        # The Changes piece's view (t-1956): a merge the agent asked for someone else isn't the owner's own work, so his
+        # rule above doesn't answer it. Each target says who else it's waiting on (one person's pending card, newest
+        # first), so the page can say "for Loren" and answer that card with --person.
+        with Store() as s:
+            pend = sorted((a for a in s.d["approvals"].values() if a["kind"] == kind and a["who"].get("agent") == agent
+                           and a["target"] in res and state_of(a) in ("pending", "allowed") and for_of(a) not in (OWNER, UNKNOWN)),
+                          key=lambda a: (state_of(a) == "pending", a["at"]), reverse=True)
+        for a in pend:
+            # Waiting on him first; else one he allowed and the agent hasn't spent yet (so the page says so, not "ask").
+            r = res[a["target"]]
+            if not any(x["for"] == for_of(a) for x in r.setdefault("asked_for", [])):
+                r["asked_for"].append({"for": for_of(a), "name": person_name(for_of(a))[:40], "id": a["id"], "state": state_of(a)})
     if as_json:
         return json.dumps(res) + "\n", ""
     out = []
