@@ -822,10 +822,10 @@ def withdraw(caller, aid, acting_for=True, statement=None):
             if a["kind"] not in PIECE_KINDS or a["who"].get("agent") != who["agent"]:
                 raise PermissionError(f"{aid} isn't one {who['agent']}'s piece filed")
         elif a["kind"] in PIECE_WITHDRAWN or not may_spend(a["who"], who):
-            # Said the same whatever it is, so a refusal tells another agent nothing of what the card is for.
+            # Said the same whatever it is (here and below), so a refusal tells nothing of what the card is or whom for.
             raise PermissionError(f"{aid} isn't one this body may take back")
         elif not (same_principal(a, p) or (p["for"] == OWNER and for_of(a) == UNKNOWN)):
-            raise PermissionError(f"{aid} was asked for {for_words(a) or 'the owner'}: only a body acting for them takes it back")
+            raise PermissionError(f"{aid} isn't one this body may take back")
         if state_of(a) != "pending":
             raise PermissionError(f"{aid} is {state_of(a)}: an answer stands")
         a["state"], a["withdrawn"] = "withdrawn", iso(now())
@@ -2052,7 +2052,7 @@ def run(argv, caller=None):
     # never files one in its own words, or for whom it likes.
     piece_kind = (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
     if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd == "standing"
-                      or (a.cmd == "withdraw" and a.as_)):
+                      or (a.cmd == "withdraw" and any(x == "--as" or x.startswith("--as=") for x in argv))):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's
         # environment; either one refuses). A body that unsets them is past what any piece here can check: loom's machine

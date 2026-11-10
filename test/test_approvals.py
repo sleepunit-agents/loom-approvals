@@ -1050,7 +1050,7 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertEqual(w(mine, "?")["exit"], 1)
         self.assertEqual(w(lorens, None)["exit"], 1)
         # The owner's own work takes back its card and one asked for someone loom can't name, never Loren's.
-        self.assertIn("was asked for Loren", w(lorens, "owner")["stderr"])
+        self.assertEqual(w(lorens, "owner")["stderr"], f"approvals: {lorens} isn't one this body may take back\n")
         self.assertEqual(w(unknown, "owner")["stdout"], f"{unknown}: withdrawn\n")
         self.assertEqual(w(mine, "owner")["stdout"], f"{mine}: withdrawn\n")
         self.assertEqual(w(lorens, "loren")["stdout"], f"{lorens}: withdrawn\n")
@@ -1064,6 +1064,12 @@ class OnWhoseBehalf(unittest.TestCase):
         chat = {"kind": "agent", "agent": "ada", "house": "h-8", "service": "discord-bodies"}
         c = self.ask_merge("owner", f"github:else/app#3@{SHA}")
         self.assertEqual(w(c, "owner", chat)["exit"], 1)
+        # A body on loom's machine never says --as, not even empty (which would skip fetching whom it acts for).
+        with mock.patch.dict(os.environ, {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}):
+            for argv in (["withdraw", c, "--as", ""], ["withdraw", c, "--as="]):
+                with self.assertRaises(PermissionError):
+                    ap.run(argv)
+        self.assertEqual(ap.get(c)["state"], "pending")
         # Not a piece's card (a vouch-wake, the clock's), from a body: the old test covers it; --as stays the piece's.
         self.assertEqual(self.api(["withdraw", c, "--as", json.dumps(HOUSE)], "owner")["exit"], 1)
 
