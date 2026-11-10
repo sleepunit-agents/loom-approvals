@@ -1790,10 +1790,20 @@ class StandingJobs(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         self.p = mock.patch.object(ap, "STATE", Path(self.td.name))
         self.p.start()
+        self.la = mock.patch.object(ap, "LOCAL_AGENT", "ada")     # loom's machine's own agent
+        self.la.start()
 
     def tearDown(self):
+        self.la.stop()
         self.p.stop()
         self.td.cleanup()
+
+    def test_never_for_another_agent_s_local_wake(self):
+        # Its clock never asks (its local wake runs in a house): a standing job for it would be a promise that's false.
+        bo = {**HOUSE, "agent": "bo"}
+        aid = self.file(target="bo:0123456789abcdef", house=bo)
+        self.assertFalse(ap.every_time_ok(ap.get(aid)))
+        self.assertFalse(ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": aid}})["ok"])
 
     def file(self, target=TGT, on_behalf="owner", house=HOUSE):
         """The clock files a local wake's card for a house's body (--as), on whose behalf it was set."""
@@ -1946,7 +1956,8 @@ class StandingJobs(unittest.TestCase):
         f = Path(self.td.name) / "rules.json"
         d = json.loads(f.read_text())
         good = dict(d["standing"][0])
-        for bad in ({"target": "ada:*"}, {"uses": "x"}, {"uses": -1}, {"off": {}}, {"used": 5}):
+        for bad in ({"target": "ada:*"}, {"uses": "x"}, {"uses": -1}, {"off": {}}, {"used": 5}, {"used": "yesterday"},
+                    {"off": {"at": "soon"}}, {"what": 3}, {"details": ["x"]}):
             d["standing"] = [{**good, **bad}]
             f.write_text(json.dumps(d))
             self.assertIsNone(self.match(), bad)

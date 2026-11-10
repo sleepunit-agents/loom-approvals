@@ -1193,9 +1193,19 @@ def well_formed_standing(j):
     f, off, uses = j.get("for"), j.get("off"), j.get("uses", 0)
     return bool(m) and m.group(1) == j.get("agent") and isinstance(who, dict) and who.get("agent") == j.get("agent") \
         and isinstance(f, str) and (f in (OWNER, UNKNOWN) or PERSON.fullmatch(f) is not None) \
-        and isinstance(j.get("at"), str) and isinstance(j.get("used", ""), str) \
+        and is_iso(j.get("at")) and ("used" not in j or is_iso(j["used"])) \
+        and isinstance(j.get("what", ""), str) and isinstance(j.get("details", ""), str) \
         and isinstance(uses, int) and not isinstance(uses, bool) and uses >= 0 \
-        and (off is None or (isinstance(off, dict) and isinstance(off.get("at"), str)))
+        and (off is None or (isinstance(off, dict) and is_iso(off.get("at"))))
+
+
+def is_iso(t):
+    """A time as this piece writes it (iso): anything else, on a row read back, isn't one of ours."""
+    try:
+        datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ")
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def every_time_ok(a):
@@ -1203,7 +1213,9 @@ def every_time_ok(a):
     names, for the owner's own work or for someone loom can't name (Jonathan's "as me": it runs as him). A card for a
     named person isn't: that would be a standing yes for them, which is a grant, not this."""
     m = STANDING_TARGET.fullmatch(str(a.get("target", "")))
-    if a.get("kind") != STANDING_KIND or state_of(a) != "pending" or not m or m.group(1) != a["who"].get("agent"):
+    # Only loom's machine's own agent: another agent's local wake runs in its house, and its clock never asks.
+    if a.get("kind") != STANDING_KIND or state_of(a) != "pending" or not m or m.group(1) != a["who"].get("agent") \
+            or m.group(1) != LOCAL_AGENT:
         return False
     if for_of(a) == OWNER:
         return True
