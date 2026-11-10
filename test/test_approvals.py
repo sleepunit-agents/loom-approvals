@@ -1805,9 +1805,14 @@ class StandingJobs(unittest.TestCase):
         self.assertFalse(ap.every_time_ok(ap.get(aid)))
         self.assertFalse(ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": aid}})["ok"])
 
-    def file(self, target=TGT, on_behalf="owner", house=HOUSE):
+    @staticmethod
+    def dig(target, tail="0"):
+        """A whole-words hash whose first 16 hex digits are the target's (the clock's sha256 of the words)."""
+        return target.split(":", 1)[1] + tail * 48
+
+    def file(self, target=TGT, on_behalf="owner", house=HOUSE, digest=True):
         """The clock files a local wake's card for a house's body (--as), on whose behalf it was set."""
-        out = ap.run(["request", "--kind", "local-wake", "--target", target, "--what", "run on loom's machine: check the disk",
+        out = ap.run(["request", "--kind", "local-wake", "--target", target, *(["--digest", self.dig(target)] if digest else []), "--what", "run on loom's machine: check the disk",
                       "--ask", "OK for Ada to run the job below on loom's machine itself?", "--why", "It needs loom's machine.",
                       "--if-yes", "It runs once.", "--if-no", "Nothing runs.", "--details", "Runs exactly as written:\ncheck the disk",
                       "--as", json.dumps(house), "--on-behalf", on_behalf])
@@ -1817,9 +1822,10 @@ class StandingJobs(unittest.TestCase):
         """The continuation sets the wake the card was for: the clock spends it."""
         ap.run(["use", aid, "--kind", "local-wake", "--target", target, "--as", json.dumps(HOUSE), "--on-behalf", on_behalf])
 
-    def match(self, target=TGT, on_behalf="owner", house=HOUSE):
+    def match(self, target=TGT, on_behalf="owner", house=HOUSE, tail="0"):
         try:
-            return ap.run(["standing", "--kind", "local-wake", "--target", target, "--as", json.dumps(house), "--on-behalf", on_behalf])
+            return ap.run(["standing", "--kind", "local-wake", "--target", target, "--digest", self.dig(target, tail),
+                           "--as", json.dumps(house), "--on-behalf", on_behalf])
         except LookupError:
             return None
 
@@ -1951,6 +1957,30 @@ class StandingJobs(unittest.TestCase):
         self.assertLessEqual(len(fine), ap.FINE_MAX)
         self.assertTrue(fine.endswith("until you turn it off under Standing jobs."))
 
+    def test_matched_on_the_whole_hash_and_the_people_named(self):
+        # The fresh read's hole: two prompts made to share the 16-hex target. The whole sha256 tells them apart.
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": self.file()}})
+        self.assertIsNone(self.match(tail="1"))
+        self.assertIsNotNone(self.match())
+        # A digest that isn't the target's own is refused when filed; a card filed without one isn't offered.
+        with self.assertRaises(ValueError):
+            ap.run(["request", "--kind", "local-wake", "--target", "ada:3333333333333333", "--digest", "4" * 64, "--what", "w",
+                    "--why", "y", "--as", json.dumps(HOUSE), "--on-behalf", "owner"])
+        self.assertFalse(ap.every_time_ok(ap.get(self.file(target="ada:5555555555555555", digest=False))))
+        # Someone loom can't name, with the people the runtime named: offered only with nobody named, matched exactly.
+        eve = self.file(target="ada:6666666666666666", on_behalf="?:eve")
+        self.assertEqual(ap.get(eve)["people"], ["eve"])
+        self.assertFalse(ap.every_time_ok(ap.get(eve)))
+        none = self.file(target="ada:7777777777777777", on_behalf="-")
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": none}})
+        self.assertIsNotNone(self.match(target="ada:7777777777777777", on_behalf="-"))
+        self.assertIsNone(self.match(target="ada:7777777777777777", on_behalf="?:eve"))
+        # And a single card asked while Eve steered is spent only for Eve.
+        ap.ui_act({"action": "allow", "caller": OWNER, "fields": {"id": eve}})
+        with self.assertRaises(PermissionError):
+            ap.run(["use", eve, "--kind", "local-wake", "--target", "ada:6666666666666666", "--as", json.dumps(HOUSE), "--on-behalf", "?:dan"])
+        ap.run(["use", eve, "--kind", "local-wake", "--target", "ada:6666666666666666", "--as", json.dumps(HOUSE), "--on-behalf", "?:eve"])
+
     def test_a_broken_file_has_no_standing_jobs(self):
         ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": self.file()}})
         f = Path(self.td.name) / "rules.json"
@@ -1961,6 +1991,8 @@ class StandingJobs(unittest.TestCase):
             d["standing"] = [{**good, **bad}]
             f.write_text(json.dumps(d))
             self.assertIsNone(self.match(), bad)
+            # And nothing set under it before runs: a file that can't be read can't be turned off from the page either.
+            self.assertEqual(ap.run(["standing", "--check", good["id"], "--as", json.dumps(HOUSE)]), "none\n")
             # The page still draws, with nothing standing.
             panel = next(b for b in ap.ui_page({"path": "", "caller": OWNER})["sections"][1]["blocks"] if b.get("title") == "Standing jobs")
             self.assertEqual(panel["rows"][0]["label"], "No standing jobs")

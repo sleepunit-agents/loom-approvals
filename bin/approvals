@@ -568,7 +568,13 @@ def principal_for_call(caller, who, statement=None, acting_for=False, on_behalf=
     """On whose behalf this call is. A piece on loom's machine acting for a body (--as) may say it (--on-behalf: the
     clock, whom the wake is for); otherwise the runtime's statement, or loom's machine's own setting, or unknown."""
     if acting_for and on_behalf:
-        return {"for": on_behalf if on_behalf == OWNER or PERSON.fullmatch(on_behalf) else UNKNOWN, "people": []}
+        if on_behalf == OWNER or PERSON.fullmatch(on_behalf):
+            return {"for": on_behalf, "people": []}
+        # Someone loom can't name, with the people the runtime named (t-2013): "?:eve,dan". So a card asked while Eve
+        # steered is never one for Dan's, nor for a body nobody named.
+        m = re.fullmatch(r"[-?]:([a-z0-9-]+(?:,[a-z0-9-]+){0,19})", on_behalf)
+        people = sorted({x for x in m.group(1).split(",") if PERSON.fullmatch(x)}) if m else []
+        return {"for": UNKNOWN, "people": people}
     return principal_of(who, statement, local=caller is None)
 
 
@@ -584,7 +590,7 @@ CONVERSATION = re.compile(r"cv-[0-9a-f]{12}")
 
 
 def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None,
-            conversation=None, statement=None, on_behalf=None):
+            conversation=None, statement=None, on_behalf=None, digest=None):
     who = who_of(caller)
     # On whose behalf (t-1943): kept on the card, which names them, and what it may be spent for.
     p = principal_for_call(caller, who, statement, acting_for, on_behalf)
@@ -599,6 +605,11 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
     if kind in PIECE_KINDS and not acting_for:
         raise PermissionError(f"a {kind} approval is filed by the piece on loom's machine for its body (--as), not by a body")
     target = exact_target(target)
+    # A local wake's whole words, as the clock hashed them (sha256, t-2013): its target is only their first 16 hex digits,
+    # and a standing job matches on all of them, so two prompts made to share a short hash never pass for each other.
+    if digest is not None and (kind != STANDING_KIND or not acting_for or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                               or target.split(":", 1)[-1] != digest[:16]):
+        raise ValueError("--digest is the clock's: a local wake's whole sha256, of which its target is the first 16 hex")
     if kind == "merge" and not repo_of(target):
         raise ValueError("a merge target is literal: <forge>:<owner>/<repo>#<n>@<40-hex head>, letters, digits, . _ - only")
     if kind == GRANT_KIND and not grant_of(target):
@@ -704,6 +715,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
              # Kept with the agent loom authenticated: the pair is what a thread checks (see request's note).
              **({"conversation": conversation} if conversation else {}),
              "who": who, "for": p["for"], **({"people": p["people"]} if p["people"] else {}),
+             **({"digest": digest} if digest else {}),
              "minutes": mins, "at": iso(now()), "state": "pending"}
         s.d["approvals"][a["id"]] = a
         s.save()
@@ -1191,7 +1203,9 @@ def well_formed_standing(j):
     m = STANDING_TARGET.fullmatch(str(j.get("target", "")))
     who = j.get("who")
     f, off, uses = j.get("for"), j.get("off"), j.get("uses", 0)
+    d = str(j.get("digest", ""))
     return bool(m) and m.group(1) == j.get("agent") and isinstance(who, dict) and who.get("agent") == j.get("agent") \
+        and re.fullmatch(r"[0-9a-f]{64}", d) is not None and d[:16] == j["target"].split(":", 1)[1] \
         and isinstance(f, str) and (f in (OWNER, UNKNOWN) or PERSON.fullmatch(f) is not None) \
         and is_iso(j.get("at")) and ("used" not in j or is_iso(j["used"])) \
         and isinstance(j.get("what", ""), str) and isinstance(j.get("details", ""), str) \
@@ -1217,6 +1231,8 @@ def every_time_ok(a):
     if a.get("kind") != STANDING_KIND or state_of(a) != "pending" or not m or m.group(1) != a["who"].get("agent") \
             or m.group(1) != LOCAL_AGENT:
         return False
+    if not re.fullmatch(r"[0-9a-f]{64}", str(a.get("digest", ""))):
+        return False        # filed before the clock said its whole words' hash: it asks once more, then it can stand
     if for_of(a) == OWNER:
         return True
     # Someone loom can't name: only from one of the agent's plain houses, with nobody named. A chat house's (others steer
@@ -1240,14 +1256,14 @@ def allow_every_time(aid, by):
         if not every_time_ok(a):
             raise ValueError("Allow every time is for a job on loom's machine, for you or for someone loom can't name")
         rows = list(s.standing())
-        same = next((j for j in rows if standing_on(j) and j["agent"] == a["who"]["agent"] and j["target"] == a["target"]
+        same = next((j for j in rows if standing_on(j) and j["agent"] == a["who"]["agent"] and j["digest"] == a["digest"]
                      and j["who"] == a["who"] and same_principal(j, {"for": for_of(a), "people": a.get("people") or []})), None)
         t = now()
         if not same:
             if sum(1 for j in rows if standing_on(j)) >= STANDING_MAX:
                 raise ValueError(f"{STANDING_MAX} standing jobs at most: turn one off first")
             same = {"id": "s-" + secrets.token_hex(4), "kind": STANDING_KIND, "agent": a["who"]["agent"],
-                    "target": a["target"], "who": a["who"], "for": for_of(a),
+                    "target": a["target"], "digest": a["digest"], "who": a["who"], "for": for_of(a),
                     **({"people": a["people"]} if a.get("people") else {}),
                     "from": aid, "what": a.get("what", ""), **({"details": a["details"]} if a.get("details") else {}),
                     "at": iso(t), "uses": 0, **({"by": by} if by else {})}
@@ -1281,17 +1297,17 @@ def standing_off(sid, by):
         return j
 
 
-def standing_match(caller, kind, target, on_behalf):
+def standing_match(caller, kind, target, on_behalf, digest=None):
     """The clock, before it files a local wake's card: the owner's standing job for exactly this agent, target and
     principal, from where this body may spend what it asked (may_spend), or None. A match is a use: counted and logged."""
     who = who_of(caller)
     target = exact_target(target)
-    if kind != STANDING_KIND:
+    if kind != STANDING_KIND or not re.fullmatch(r"[0-9a-f]{64}", str(digest or "")):
         return None
     p = principal_for_call(caller, who, None, True, on_behalf)
     with Store() as s:
         rows = list(s.standing())
-        j = next((x for x in rows if standing_on(x) and x["agent"] == who["agent"] and x["target"] == target
+        j = next((x for x in rows if standing_on(x) and x["agent"] == who["agent"] and x["target"] == target and x["digest"] == digest
                   and may_spend(x["who"], who) and same_principal(x, p)), None)
         if not j:
             return None
@@ -1306,7 +1322,9 @@ def standing_state(caller, sid):
     who = who_of(caller)
     with Store() as s:
         j = next((x for x in s.standing() if x["id"] == sid), None)
-    if not j or j["agent"] != who["agent"]:
+        broken = s.rules_broken
+    # A rules.json that can't be read whole can't be turned off from the page either: nothing set under it runs.
+    if broken or not j or j["agent"] != who["agent"]:
         return "none"
     return "on" if standing_on(j) else "off"
 
@@ -1961,7 +1979,7 @@ def run(argv, caller=None):
     ap = argparse.ArgumentParser(prog="approvals", add_help=False, exit_on_error=False)
     sub = ap.add_subparsers(dest="cmd")
     r = sub.add_parser("request", add_help=False, exit_on_error=False)
-    for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details", "--conversation"):
+    for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details", "--conversation", "--digest"):
         r.add_argument(f, default="")
     r.add_argument("--if-yes", dest="if_yes", default="")
     r.add_argument("--if-no", dest="if_no", default="")
@@ -1982,7 +2000,7 @@ def run(argv, caller=None):
     w.add_argument("--as", dest="as_", default="")
     sub.add_parser("list", add_help=False, exit_on_error=False)
     st = sub.add_parser("standing", add_help=False, exit_on_error=False)
-    for fl in ("--kind", "--target", "--check"):
+    for fl in ("--kind", "--target", "--check", "--digest"):
         st.add_argument(fl, default="")
     st.add_argument("--as", dest="as_", default="")
     st.add_argument("--on-behalf", dest="on_behalf", default="")
@@ -2044,7 +2062,7 @@ def run(argv, caller=None):
         x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None,
                     acting_for=bool(a.as_), ask=a.ask or None, if_yes=a.if_yes or None, if_no=a.if_no or None,
                     details=a.details or None, conversation=a.conversation or None, statement=statement,
-                    on_behalf=a.on_behalf or None)
+                    on_behalf=a.on_behalf or None, digest=a.digest or None)
         if x["state"] == "denied":
             return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
         if x["state"] == "allowed" and x["kind"] == GRANT_KIND:
@@ -2060,7 +2078,7 @@ def run(argv, caller=None):
     if a.cmd == "standing":
         if a.check:
             return standing_state(caller, a.check) + "\n"
-        j = standing_match(caller, a.kind, a.target, a.on_behalf)
+        j = standing_match(caller, a.kind, a.target, a.on_behalf, a.digest)
         if not j:
             raise LookupError(f"no standing job for {a.kind} {a.target}: it asks")
         return f"{j['id']}: standing, set by the owner {j['at']}\n"
