@@ -1190,10 +1190,12 @@ def well_formed_standing(j):
         return False
     m = STANDING_TARGET.fullmatch(str(j.get("target", "")))
     who = j.get("who")
-    f = j.get("for")
+    f, off, uses = j.get("for"), j.get("off"), j.get("uses", 0)
     return bool(m) and m.group(1) == j.get("agent") and isinstance(who, dict) and who.get("agent") == j.get("agent") \
         and isinstance(f, str) and (f in (OWNER, UNKNOWN) or PERSON.fullmatch(f) is not None) \
-        and isinstance(j.get("at"), str) and (j.get("off") is None or isinstance(j.get("off"), dict))
+        and isinstance(j.get("at"), str) and isinstance(j.get("used", ""), str) \
+        and isinstance(uses, int) and not isinstance(uses, bool) and uses >= 0 \
+        and (off is None or (isinstance(off, dict) and isinstance(off.get("at"), str)))
 
 
 def every_time_ok(a):
@@ -1201,8 +1203,13 @@ def every_time_ok(a):
     names, for the owner's own work or for someone loom can't name (Jonathan's "as me": it runs as him). A card for a
     named person isn't: that would be a standing yes for them, which is a grant, not this."""
     m = STANDING_TARGET.fullmatch(str(a.get("target", "")))
-    return a.get("kind") == STANDING_KIND and state_of(a) == "pending" and bool(m) \
-        and m.group(1) == a["who"].get("agent") and for_of(a) in (OWNER, UNKNOWN)
+    if a.get("kind") != STANDING_KIND or state_of(a) != "pending" or not m or m.group(1) != a["who"].get("agent"):
+        return False
+    if for_of(a) == OWNER:
+        return True
+    # Someone loom can't name: only from one of the agent's plain houses, with nobody named. A chat house's (others steer
+    # it) or one that names people would be a standing yes for them, run as the owner, as often as they set it.
+    return for_of(a) == UNKNOWN and not a.get("people") and service_of(a["who"]) is None
 
 
 def standing_on(j):
@@ -1480,8 +1487,8 @@ def fine_print(a):
         # What the third button does, in the piece's words (t-2013), when it fits (loom refuses fine print past 400).
         every = (f" {EVERY_TIME}: these exact words run as you each time {name_of(a['who'].get('agent'))} sets them, "
                  "until you turn it off under Standing jobs.")
-        if len(once + every) <= FINE_MAX:
-            once += every
+        # Always said, beside its button: the once-text gives way if both don't fit.
+        once = (once if len(once + every) <= FINE_MAX else once[:FINE_MAX - len(every) - 1].rstrip() + "…") + every
     return once
 
 
@@ -1988,7 +1995,9 @@ def run(argv, caller=None):
     if getattr(a, "on_behalf", "") and not a.as_:
         raise PermissionError("--on-behalf is for a piece on loom's machine acting for a body (--as)")
     body_here = bool(os.environ.get("LOOM_BODY_CONVERSATION") or os.environ.get("LOOM_BODY_KEY"))
-    piece_kind = a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS
+    # A local wake's card is the clock's too (t-2013): Allow every time makes it standing, so a body on loom's machine
+    # never files one in its own words, or for whom it likes.
+    piece_kind = (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
     if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd in ("withdraw", "standing")):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's

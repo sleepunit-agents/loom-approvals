@@ -1923,13 +1923,36 @@ class StandingJobs(unittest.TestCase):
         with ap.Store() as s:
             self.assertEqual(s.standing()[0]["uses"], 0)
 
+    def test_a_body_on_loom_s_machine_never_files_a_local_wake_card(self):
+        # The cold review's hole: a body's own words on the card, made standing by Allow every time.
+        for env in ({"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}, {"LOOM_BODY_KEY": "k"}):
+            with mock.patch.dict(os.environ, env), self.assertRaises(PermissionError):
+                self.file()
+        self.assertEqual(ap.ui_manifest()["asks"], [])
+
+    def test_not_offered_for_a_chat_house_or_named_people_and_always_explained(self):
+        chat = self.file(on_behalf="-", house={**HOUSE, "house": "h-9", "service": "chat"})
+        self.assertFalse(ap.every_time_ok(ap.get(chat)))
+        self.assertFalse(ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": chat}})["ok"])
+        self.assertFalse(ap.every_time_ok({**ap.get(chat), "who": HOUSE, "people": ["loren", "dan"]}))
+        # The sentence beside the button is never dropped, however long the rest.
+        a = {**ap.get(self.file(target="ada:2222222222222222")), "who": {"agent": "ada", "where": "h-1 " + "x" * 300}}
+        fine = ap.fine_print(a)
+        self.assertLessEqual(len(fine), ap.FINE_MAX)
+        self.assertTrue(fine.endswith("until you turn it off under Standing jobs."))
+
     def test_a_broken_file_has_no_standing_jobs(self):
         ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": self.file()}})
         f = Path(self.td.name) / "rules.json"
         d = json.loads(f.read_text())
-        d["standing"][0]["target"] = "ada:*"
-        f.write_text(json.dumps(d))
-        self.assertIsNone(self.match())
+        good = dict(d["standing"][0])
+        for bad in ({"target": "ada:*"}, {"uses": "x"}, {"uses": -1}, {"off": {}}, {"used": 5}):
+            d["standing"] = [{**good, **bad}]
+            f.write_text(json.dumps(d))
+            self.assertIsNone(self.match(), bad)
+            # The page still draws, with nothing standing.
+            panel = next(b for b in ap.ui_page({"path": "", "caller": OWNER})["sections"][1]["blocks"] if b.get("title") == "Standing jobs")
+            self.assertEqual(panel["rows"][0]["label"], "No standing jobs")
         # And a rule edit never writes the job away while it's unreadable.
         with self.assertRaises(ValueError):
             ap.set_rule("merge", "github:acme/*", "do", "jo")
