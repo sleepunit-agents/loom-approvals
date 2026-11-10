@@ -150,7 +150,7 @@ piece's), answered only by the household owner, and spent only by that piece, in
 - **`principal-reset`**, target `<agent>:<cv-id>`, filed by the runtime: "Count this conversation as your work from
   now on?", with its label. Allow: the runtime resets whom it acts for, signed as the owner's (`loom runtime principal
   --reset`, without the terminal).
-- **`box-write-off`**, target `<agent>:<box id>`, filed by the runtime (t-2057) when a box has been silent 10 minutes
+- **`box-write-off`**, target `<agent>:<box id>@<last heard, unix seconds>` (one card per stretch of silence), filed by the runtime (t-2057) when a box has been silent 10 minutes
   with the agent's conversations in its houses: "The box “one” has been silent for 12 minutes. Carry on Art's 2
   conversations from there on another box?", the box named in `--details`. Its headline is the runtime's (the box's
   name and how long); "If you allow" and "If you deny" are this piece's. Allow: the runtime writes off that agent's

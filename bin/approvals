@@ -168,7 +168,7 @@ GRANT_NAME = r"[a-z][a-z0-9-]{0,39}"
 #                    it worked for, are the owner's work, and fire as his. The ids sorted, each once: one set, one text.
 #   principal-reset  <agent>:<cv-id>  (the runtime): this conversation is the owner's from now on (`loom runtime
 #                    principal --reset`): what it heard before is set aside, and its session dropped.
-#   box-write-off    <agent>:<box id>  (the runtime, t-2057): that box has gone silent with the agent's conversations
+#   box-write-off    <agent>:<box id>@<last heard, unix s>  (the runtime, t-2057): that box has gone silent with the agent's conversations
 #                    in its houses; they're written off and carried on on the next box it may use.
 VOUCH_KIND = "vouch-wake"
 RESET_KIND = "principal-reset"
@@ -178,7 +178,7 @@ WRITEOFF_KIND = "box-write-off"
 VOUCH_MAX = 12
 VOUCH_TARGET = re.compile(rf"({GRANT_NAME}):(w-[0-9a-f]{{6}}(?:,w-[0-9a-f]{{6}}){{0,{VOUCH_MAX - 1}}})")
 RESET_TARGET = re.compile(rf"({GRANT_NAME}):(cv-[0-9a-f]{{12}})")
-WRITEOFF_TARGET = re.compile(rf"({GRANT_NAME}):([A-Za-z0-9][A-Za-z0-9._-]{{0,63}})")
+WRITEOFF_TARGET = re.compile(rf"({GRANT_NAME}):([A-Za-z0-9][A-Za-z0-9._-]{{0,63}})@([0-9]{{1,12}})")
 OWNER_APPLIED = {GRANT_KIND, VOUCH_KIND, RESET_KIND, WRITEOFF_KIND}
 # Filed and spent by a piece for the agent it names, on the owner's behalf, with --details saying what it covers.
 PIECE_OWNER_KINDS = (VOUCH_KIND, RESET_KIND, WRITEOFF_KIND)
@@ -196,9 +196,10 @@ def vouch_of(target):
 
 
 def writeoff_of(target):
-    """A box-write-off target as {agent, box}, or None: art:7f9310-0a1b2c-3d4e5f-6a7b8c."""
+    """A box-write-off target as {agent, box, since}, or None: art:7f9310-0a1b2c-3d4e5f-6a7b8c@1762718400 (the box last
+    heard at that Unix second: one card for one stretch of silence)."""
     m = WRITEOFF_TARGET.fullmatch(str(target or ""))
-    return {"agent": m.group(1), "box": m.group(2)} if m else None
+    return {"agent": m.group(1), "box": m.group(2), "since": int(m.group(3))} if m else None
 
 
 def piece_target_agent(kind, target):
@@ -588,7 +589,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
     if kind == RESET_KIND and not reset_of(target):
         raise ValueError("a principal-reset target is <agent>:<cv-id>")
     if kind == WRITEOFF_KIND and not writeoff_of(target):
-        raise ValueError("a box-write-off target is <agent>:<box id>")
+        raise ValueError("a box-write-off target is <agent>:<box id>@<last heard, unix seconds>")
     if kind in PIECE_OWNER_KINDS and piece_target_agent(kind, target) != who["agent"]:
         # Filed for the agent whose wakes or conversation it names: its owner reads whose they are from the card.
         raise PermissionError(f"a {kind} approval names the agent it's filed for ({who['agent']})")
