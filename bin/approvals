@@ -631,6 +631,23 @@ def principal_words(p):
 DETAILS_MAX = 1000
 
 
+def proven_conversation(caller, who, conversation, statement=None, acting_for=False):
+    """The conversation a request may name (t-2117), or None. A body's: only the one the runtime's signed statement is
+    for (the runtime mints one only for the body holding that conversation, proven by its run's key, its session and,
+    in a house, its house), and only for this same agent. One it names that its statement isn't for is dropped: the
+    card is still filed, just shown in no thread. A piece on loom's machine acting for a body (--as) and loom's machine's
+    own account (no caller, and no body here) say it themselves, as before: loom's machine is the trust boundary."""
+    if not conversation:
+        return None
+    if acting_for or (caller is None and not LOCAL_BODY):
+        return conversation
+    v = verify_statement(statement) if statement else None
+    if not v or v.get("agent") != who.get("agent"):
+        return None
+    cv = v.get("conversation")
+    return conversation if isinstance(cv, str) and CONVERSATION.fullmatch(cv) and cv == conversation else None
+
+
 CONVERSATION = re.compile(r"cv-[0-9a-f]{12}")
 
 
@@ -639,12 +656,12 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
     who = who_of(caller)
     # On whose behalf (t-1943): kept on the card, which names them, and what it may be spent for.
     p = principal_for_call(caller, who, statement, acting_for, on_behalf)
-    # The conversation the body says it asked from (loom docs/specs/comms.md, "Asks inline"): a Comms thread shows its
-    # own pending approvals. It's the body's claim, not something loom vouches for: the caller loom authenticates is an
-    # agent (and its house), never a conversation. So it decides nothing about the approval, and loom shows the ask in
-    # a thread only when this approval's agent (who.agent, which loom did authenticate) is that thread's agent.
+    # The conversation it was asked from (loom docs/specs/comms.md, "Asks inline"): a Comms thread shows its own pending
+    # approvals. It decides nothing about the approval, but it puts a card in that thread, so a body names only its own
+    # (t-2117): the one the runtime's signed statement is for (proven_conversation), never one it merely says.
     if conversation and not CONVERSATION.fullmatch(conversation):
         raise ValueError("--conversation is a conversation id, cv- and 12 hex")
+    conversation = proven_conversation(caller, who, conversation, statement, acting_for)
     if not KIND.match(kind or ""):
         raise ValueError("--kind is the wall it hit, like github-write or relay")
     if kind in PIECE_KINDS and not acting_for:
@@ -2395,8 +2412,8 @@ def forward(piece, argv):
 
 def main():
     args = sys.argv[1:]
-    # Local and house bodies carry the same conversation provenance. It is a display link,
-    # never authority: the verified principal still decides what the request may do.
+    # Local and house bodies carry the same conversation provenance: a display link, never authority, and kept only
+    # when the runtime's statement is for that same conversation (proven_conversation, t-2117).
     conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
     if args[:1] == ["request"] and "--conversation" not in args and CONVERSATION.fullmatch(conv):
         args = [*args, "--conversation", conv]

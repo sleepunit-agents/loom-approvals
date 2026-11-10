@@ -36,17 +36,19 @@ HOUSE = {"kind": "agent", "agent": "ada", "house": "h-7"}
 def fake_verify(statement):
     """The runtime's --verify, for tests: "S:<agent>:<for>" verifies; for is owner, a slug, ? (unknown) or a,b (several)."""
     parts = str(statement).split(":")
-    if len(parts) != 3 or parts[0] != "S":
+    if len(parts) not in (3, 4) or parts[0] != "S":
         return None
     agent, f = parts[1], parts[2]
+    # The conversation it was minted for: a fourth part, else the one these tests ask from.
+    cv = {"conversation": parts[3] if len(parts) == 4 else "cv-0123456789ab"}
     if f == "owner":
-        return {"ok": True, "agent": agent, "for": "jonathan", "owner": True, "people": []}
+        return {"ok": True, "agent": agent, "for": "jonathan", "owner": True, "people": [], **cv}
     if f == "?":
-        return {"ok": True, "agent": agent, "for": None, "owner": False, "people": []}
+        return {"ok": True, "agent": agent, "for": None, "owner": False, "people": [], **cv}
     if f.startswith("@"):      # a person by this name, not the owner
-        return {"ok": True, "agent": agent, "for": f[1:], "owner": False, "people": [f[1:]]}
+        return {"ok": True, "agent": agent, "for": f[1:], "owner": False, "people": [f[1:]], **cv}
     people = f.split(",")
-    return {"ok": True, "agent": agent, "for": people[0] if len(people) == 1 else None, "owner": False, "people": people}
+    return {"ok": True, "agent": agent, "for": people[0] if len(people) == 1 else None, "owner": False, "people": people, **cv}
 
 
 # Every test runs with the fake runtime; a call that's the owner's own work says so, as a house's piece-call would.
@@ -816,6 +818,38 @@ class PlainAsks(unittest.TestCase):
         self.assertEqual(ap.ui_manifest()["asks"][0]["conversation"], "cv-0123456789ab")
         self.ask(*self.GOOD, "--conversation", "cv-00000000000f")
         self.assertEqual(ap.ui_manifest()["asks"][0]["conversation"], "cv-0123456789ab", "never move an existing thread's ask")
+
+    def test_a_body_names_only_the_conversation_its_statement_is_for(self):
+        # t-2117: a card shows in a Comms thread, so a body puts one only in its own: the conversation the runtime's
+        # signed statement is for. Another it names is dropped (the card is still filed, in no thread).
+        def conv_of(*principal, cv="cv-0123456789ab", target="acme/app:x", caller=HOUSE, extra=()):
+            argv = ["request", "--kind", "github-write", "--target", target, *self.GOOD, "--conversation", cv, *principal, *extra]
+            r = ap.api_answer({"caller": caller, "path": "run", "body": {"argv": argv}})["body"]
+            self.assertEqual(r["exit"], 0, r)
+            aid = r["stdout"].split(":")[0]
+            return ap.api_answer({"caller": {"kind": "owner", "agents": "*"}, "path": "state", "body": {"ids": [aid]}})["body"]["approvals"][aid]["conversation"]
+        self.assertEqual(conv_of("--principal", "S:ada:owner:cv-0123456789ab", target="acme/app:mine"), "cv-0123456789ab")
+        self.assertIsNone(conv_of("--principal", "S:ada:owner:cv-00000000000f", target="acme/app:other"),
+                          "a statement for another conversation: never shown in this one")
+        self.assertIsNone(conv_of("--principal", "S:eve:owner:cv-0123456789ab", target="acme/app:agent"),
+                          "another agent's statement for that conversation: not this body's")
+        self.assertIsNone(conv_of(target="acme/app:none"), "no statement: no thread")
+        self.assertIsNone(conv_of("--principal", "junk", target="acme/app:junk"), "one that doesn't verify: no thread")
+
+    def test_a_piece_on_loom_s_machine_still_says_the_conversation(self):
+        # A piece acting for a body (--as, loom's machine only) and loom's machine's own account say it themselves.
+        as_ = json.dumps(HOUSE)
+        out = ap.run(["request", "--kind", "github-write", "--target", "acme/app:piece", *self.GOOD, "--conversation",
+                      "cv-00000000000f", "--as", as_, "--on-behalf", "owner"])
+        aid = out.split(":")[0]
+        self.assertEqual(ap.get(aid).get("conversation"), "cv-00000000000f")
+        with mock.patch.object(ap, "LOCAL_BODY", True):
+            self.assertIsNone(ap.proven_conversation(None, {"agent": "ada"}, "cv-00000000000f", None),
+                              "a body on loom's machine is held to its statement, like a house's")
+            self.assertEqual(ap.proven_conversation(None, {"agent": "ada"}, "cv-00000000000f", "S:ada:owner:cv-00000000000f"),
+                             "cv-00000000000f")
+        self.assertEqual(ap.proven_conversation(None, {"agent": "ada"}, "cv-00000000000f", None), "cv-00000000000f",
+                         "loom's machine's own account, no body: as before")
 
     def test_in_a_house_a_body_s_request_carries_its_conversation(self):
         seen = {}
