@@ -957,7 +957,7 @@ class OnWhoseBehalf(unittest.TestCase):
         # On the page, beside his own rules, in words; a member who owns some agents doesn't see either.
         rules = next(x for x in ap.ui_page({"path": "", "caller": OWNER})["sections"] if x["id"] == "rules")
         panels = {b["title"]: b for b in rules["blocks"]}
-        self.assertEqual(list(panels), ["Merging, for you", "Merging, for other people"])
+        self.assertEqual(list(panels), ["Merging, for you", "Merging, for other people", "Standing jobs"])
         row = panels["Merging, for other people"]["rows"][0]
         self.assertEqual((row["label"], row["value"]), ("Loren: Everything in onterris", "Just do it"))
         self.assertEqual(row["choice"]["fields"], {"person": "loren", "scope": "github:onterris/*", "kind": "merge"})
@@ -1779,6 +1779,160 @@ class OwnerApplied(unittest.TestCase):
                       "--as", self.AS, "--on-behalf", "owner"])
         self.assertEqual(out, f"{aid}: the owner allowed it; the piece that filed it applies it (use it there: --kind vouch-wake)\n")
 
+
+
+class StandingJobs(unittest.TestCase):
+    """t-2013: Allow every time on a local wake's card. One Allow covers every later time the same agent sets exactly
+    those words for the same principal; changed words, another agent, another principal or a turned-off job ask."""
+    TGT = "ada:0123456789abcdef"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(ap, "STATE", Path(self.td.name))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.td.cleanup()
+
+    def file(self, target=TGT, on_behalf="owner", house=HOUSE):
+        """The clock files a local wake's card for a house's body (--as), on whose behalf it was set."""
+        out = ap.run(["request", "--kind", "local-wake", "--target", target, "--what", "run on loom's machine: check the disk",
+                      "--ask", "OK for Ada to run the job below on loom's machine itself?", "--why", "It needs loom's machine.",
+                      "--if-yes", "It runs once.", "--if-no", "Nothing runs.", "--details", "Runs exactly as written:\ncheck the disk",
+                      "--as", json.dumps(house), "--on-behalf", on_behalf])
+        return out.split(":")[0]
+
+    def spend(self, aid, target=TGT, on_behalf="owner"):
+        """The continuation sets the wake the card was for: the clock spends it."""
+        ap.run(["use", aid, "--kind", "local-wake", "--target", target, "--as", json.dumps(HOUSE), "--on-behalf", on_behalf])
+
+    def match(self, target=TGT, on_behalf="owner", house=HOUSE):
+        try:
+            return ap.run(["standing", "--kind", "local-wake", "--target", target, "--as", json.dumps(house), "--on-behalf", on_behalf])
+        except LookupError:
+            return None
+
+    def test_one_allow_every_time_covers_every_later_time_and_says_so(self):
+        aid = self.file()
+        # The third button: on the page's sheet for the owner, and on Home's card.
+        sheet = ap.ui_page({"path": "", "caller": OWNER})["sections"][0]["blocks"][0]["rows"][0]["sheet"]
+        labels = [b["label"] for b in next(x for x in sheet["blocks"] if x["type"] == "buttons")["items"]]
+        self.assertEqual(labels, ["Allow once", "Allow every time", "Deny"])
+        ask = ap.ui_manifest()["asks"][0]
+        self.assertEqual([x["action"] for x in ask["actions"]], ["allow", "every-time", "deny"])
+        self.assertIn("Allow every time: these exact words run as you", ask["fine"])
+        self.assertLessEqual(len(ask["fine"]), ap.FINE_MAX)
+        self.assertIsNone(self.match(), "nothing stands before the owner says so")
+        r = ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": aid}})
+        self.assertTrue(r["ok"], r)
+        # This card is allowed (its continuation spends it as before), and the job stands from now on.
+        self.assertEqual(ap.get(aid)["state"], "allowed")
+        first, second = self.match(), self.match()
+        self.assertRegex(first or "", r"^s-[0-9a-f]{8}: standing")
+        self.assertEqual(first, second)
+        # No second card: the clock never files one while it matches. And each use is counted and logged.
+        with ap.Store() as s:
+            [j] = s.standing()
+        self.assertEqual((j["uses"], j["for"], j["agent"], j["target"], j["by"]), (2, "owner", "ada", self.TGT, "jonathan-barket"))
+        log = [json.loads(l) for l in (Path(self.td.name) / "audit.jsonl").read_text().splitlines()]
+        self.assertEqual([e["event"] for e in log].count("standing-use"), 2)
+        # Asking again for an identical one (set the long way round) doesn't double it.
+        self.spend(aid)
+        aid2 = self.file()
+        self.assertNotEqual(aid2, aid)
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": aid2}})
+        with ap.Store() as s:
+            self.assertEqual(len(s.standing()), 1)
+        # The owner's page lists it: what it runs, used twice.
+        panel = next(b for b in ap.ui_page({"path": "", "caller": OWNER})["sections"][1]["blocks"] if b.get("title") == "Standing jobs")
+        self.assertEqual(panel["rows"][0]["value"], "Every time")
+        self.assertIn("used 2 times", panel["rows"][0]["detail"])
+
+    def test_changed_words_another_agent_another_principal_or_service_ask(self):
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": self.file()}})
+        self.assertIsNone(self.match(target="ada:0123456789abcdee"), "other words")
+        self.assertIsNone(self.match(target="bo:0123456789abcdef", house={**HOUSE, "agent": "bo"}), "another agent")
+        self.assertIsNone(self.match(on_behalf="loren"), "set for someone else")
+        self.assertIsNone(self.match(on_behalf="-"), "set for someone loom can't name")
+        # A chat house (others steer it) spends only what its own service asked for.
+        self.assertIsNone(self.match(house={**HOUSE, "house": "h-9", "service": "chat"}))
+        # Any of the agent's plain houses: a later continuation's.
+        self.assertIsNotNone(self.match(house={**HOUSE, "house": "h-99"}))
+
+    def test_turned_off_it_asks_again_and_a_wake_set_under_it_is_told(self):
+        first = self.file()
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": first}})
+        self.spend(first)
+        sid = self.match().split(":")[0]
+        check = lambda who=HOUSE: ap.run(["standing", "--check", sid, "--as", json.dumps(who)])
+        self.assertEqual(check(), "on\n")
+        self.assertEqual(check({**HOUSE, "agent": "bo"}), "none\n", "only the agent it's for reads it")
+        self.assertFalse(ap.ui_act({"action": "standing-off", "caller": {"kind": "owner", "who": "sam", "agents": ["ada"]}, "fields": {"id": sid}})["ok"])
+        r = ap.ui_act({"action": "standing-off", "caller": OWNER, "fields": {"id": sid}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(check(), "off\n")
+        self.assertIsNone(self.match())
+        # Kept, shown as turned off; asking again files a card, and a new Allow every time makes a new one.
+        with ap.Store() as s:
+            [j] = s.standing()
+        self.assertEqual(j["off"]["by"], "jonathan-barket")
+        aid = self.file()
+        self.assertEqual(ap.get(aid)["state"], "pending")
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": aid}})
+        self.assertNotEqual(self.match().split(":")[0], sid)
+
+    def test_only_the_owner_sets_one_and_never_for_a_named_person_or_another_kind(self):
+        aid = self.file()
+        for c in (None, {"kind": "owner", "who": "sam", "agents": ["ada"]}, {"kind": "agent", "agent": "ada"}):
+            self.assertFalse(ap.ui_act({"action": "every-time", "caller": c, "fields": {"id": aid}})["ok"], c)
+        sheet = ap.ui_page({"path": "", "caller": {"kind": "owner", "who": "sam", "agents": ["ada"]}})["sections"][0]["blocks"][0]["rows"][0]["sheet"]
+        self.assertNotIn("every-time", json.dumps(next(x for x in sheet["blocks"] if x["type"] == "buttons")))
+        self.assertEqual(ap.get(aid)["state"], "pending")
+        # For a named person: a standing yes for them would be a grant, not this. Not offered, refused if tried.
+        pid = self.file(target="ada:1111111111111111", on_behalf="loren")
+        self.assertNotIn("every-time", json.dumps(next(a for a in ap.ui_manifest()["asks"] if "Loren" in a["text"])))
+        self.assertFalse(ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": pid}})["ok"])
+        # Another kind (a body's own wall) never.
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": ["request", "--kind", "github-write", "--target", "acme/app:x",
+                           "--what", "push", "--why", "y", *AS_OWNER]}})
+        gid = r["body"]["stdout"].split(":")[0]
+        self.assertFalse(ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": gid}})["ok"])
+        # Answered already: refused.
+        ap.ui_act({"action": "deny", "caller": OWNER, "fields": {"id": aid}})
+        self.assertFalse(ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": aid}})["ok"])
+
+    def test_someone_loom_can_t_name_gets_it_as_the_owner_said_for_exactly_that(self):
+        aid = self.file(on_behalf="-")
+        self.assertIn("every-time", json.dumps(ap.ui_manifest()["asks"][0]["actions"]))
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": aid}})
+        self.assertIsNotNone(self.match(on_behalf="-"))
+        self.assertIsNone(self.match(on_behalf="owner"), "the owner's own work is its own principal")
+
+    def test_a_body_never_matches_or_reads_it_itself(self):
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": self.file()}})
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": ["standing", "--kind", "local-wake", "--target", self.TGT,
+                           "--on-behalf", "owner"]}})
+        self.assertEqual(r["body"]["exit"], 1)
+        with self.assertRaises(PermissionError):
+            ap.run(["standing", "--kind", "local-wake", "--target", self.TGT, "--on-behalf", "owner"])
+        with self.assertRaises(PermissionError):
+            ap.run(["standing", "--kind", "local-wake", "--target", self.TGT, "--as", json.dumps(HOUSE)])
+        with mock.patch.dict(os.environ, {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}), self.assertRaises(PermissionError):
+            self.match()
+        with ap.Store() as s:
+            self.assertEqual(s.standing()[0]["uses"], 0)
+
+    def test_a_broken_file_has_no_standing_jobs(self):
+        ap.ui_act({"action": "every-time", "caller": OWNER, "fields": {"id": self.file()}})
+        f = Path(self.td.name) / "rules.json"
+        d = json.loads(f.read_text())
+        d["standing"][0]["target"] = "ada:*"
+        f.write_text(json.dumps(d))
+        self.assertIsNone(self.match())
+        # And a rule edit never writes the job away while it's unreadable.
+        with self.assertRaises(ValueError):
+            ap.set_rule("merge", "github:acme/*", "do", "jo")
 
 if __name__ == "__main__":
     unittest.main()

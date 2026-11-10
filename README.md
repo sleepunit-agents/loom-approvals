@@ -215,6 +215,22 @@ approvals grant --kind merge --target <same> --for AGENT --by MEMBER [--person S
 - A rule never grants a write a guard would refuse: it only says whether to
   ask the owner.
 
+## Standing jobs
+
+A house's job that needs loom's machine (`<!-- house: local -->`) asks every time it's set: a single-use approval for
+exactly its words. On that card the household owner may say **Allow every time** instead (t-2013). It allows this
+one and records a standing job, kept beside the rules in `rules.json`, for exactly that agent, those words (the card's
+target, a hash of them) and whom the job was set for, where the card was asked from (a chat house spends only its own
+service's), run on loom's machine as the owner. A card for a named person doesn't offer it: a standing yes for
+someone else is a grant.
+
+The clock asks `approvals standing --kind local-wake --target T --as <body> --on-behalf <whom>` before it files a
+card. A match sets the wake with no card, as the owner's work, and is counted and logged (`standing-use` in the
+audit). Words that differ by a letter, another agent, another principal, or a job turned off ask again. The owner
+sees each one under **Standing jobs** on this page, with how often it was used, and turns it off there. A wake set
+under a job that's since been turned off doesn't run: the clock checks (`approvals standing --check s-…`) when it
+fires. Only the household owner sets or turns one off, and only the clock on loom's machine reads them.
+
 ## Install
 
 It's a loom piece: an npm package with a `loom-approvals` bin and a `loom`
