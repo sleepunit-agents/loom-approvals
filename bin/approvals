@@ -136,7 +136,7 @@ LOCATOR_MAX = 120
 LOCATOR = r"[\x21-\x22\x24-\x3f\x41-\x7e]{1,120}"     # a rule's pattern (the owner's): printable ASCII but space, # and @
 PATTERN_CHARS = set("*?[]{}!\\")
 TIERS = ("do", "tell", "ask")
-RULE_KINDS = ("merge",)
+RULE_KINDS = ("merge", "host")
 RULES_MAX = 100
 GRANTS_MAX = 100
 PERSON = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -187,7 +187,46 @@ WRITEOFF_TARGET = re.compile(rf"({GRANT_NAME}):([A-Za-z0-9][A-Za-z0-9._-]{{0,63}
 OWNER_APPLIED = {GRANT_KIND, VOUCH_KIND, RESET_KIND, WRITEOFF_KIND}
 # Filed and spent by a piece for the agent it names, on the owner's behalf, with --details saying what it covers.
 PIECE_OWNER_KINDS = (VOUCH_KIND, RESET_KIND, WRITEOFF_KIND)
-PIECE_SPENT = set(OWNER_APPLIED)
+# Steps on loom's machine (t-2104, loom-box hostverbs.mjs): a body asks the runtime, which runs one of a fixed set of
+# verbs through a model-free executor. Its target is `<verb>:<arg>` (restart:loom-http.service, pieces-update:runtime).
+# The runtime reads the owner's standing rule for it (rule host), tells him after a tell-tier step (tell --kind host)
+# and spends his yes for an ask-tier one (use --kind host), each --as the body, --on-behalf owner. A body files the card
+# (request --kind host), but never spends it: only the runtime does, in the step that runs it (PIECE_SPENT). Only the
+# household owner answers one, and the card's headline is the piece's words for the step, never the body's.
+HOST_KIND = "host"
+HOST_VERBS = ("unit-status", "journal", "art-chain-check", "read", "deploy-loom", "pieces-update", "restart")
+_HOST_VERB = "|".join(re.escape(v) for v in HOST_VERBS)
+HOST_TARGET = re.compile(rf"({_HOST_VERB}):([A-Za-z0-9@._/-]{{1,200}})")
+# A host rule's scope (the owner's): host:<verb> (every step of that verb) or host:<verb>:<arg> (one), where the arg
+# may use * for any characters but / (glob_match): host:restart, host:restart:loom-piece-*, host:read:allocator-*.
+HOST_SCOPE = re.compile(rf"host:({_HOST_VERB})(?::([A-Za-z0-9@._/*-]{{1,200}}))?")
+PIECE_SPENT = set(OWNER_APPLIED) | {HOST_KIND}
+# Answered only by the household owner: loom's machine is his (an agent's owner answers its other asks, not these).
+OWNER_ANSWERED = OWNER_APPLIED | {HOST_KIND}
+
+
+def host_of(target):
+    """A host target as {verb, arg}, or None: restart:loom-http.service."""
+    m = HOST_TARGET.fullmatch(str(target or ""))
+    if not m or any(x == ".." for x in m.group(2).split("/")):
+        return None
+    return {"verb": m.group(1), "arg": m.group(2)}
+
+
+def host_words(target):
+    """The step in the piece's words, from its target (never the body's): "Restart loom-http on loom's machine?"."""
+    h = host_of(target)
+    if not h:
+        return None
+    v, x = h["verb"], h["arg"]
+    unit = x.removesuffix(".service")
+    return {"unit-status": f"Read the status of {unit} on loom's machine?",
+            "journal": f"Read {unit}'s log on loom's machine?",
+            "art-chain-check": "Run Art's wake-chain check on loom's machine?",
+            "read": f"Read {x} from the runtime's logs on loom's machine?",
+            "deploy-loom": f"Deploy loom's latest build on loom's machine ({x})?",
+            "pieces-update": f"Update loom's {x} piece on loom's machine?",
+            "restart": f"Restart {unit} on loom's machine?"}[v]
 
 
 def vouch_of(target):
@@ -229,6 +268,8 @@ def owner_words(a):
         return "Count this scheduled job as your work?" if n == 1 else f"Count these {n} scheduled jobs as your work?"
     if k == RESET_KIND and reset_of(t):
         return "Count this conversation as your work from now on?"
+    if k == HOST_KIND and host_of(t):
+        return host_words(t)
     return None
 
 
@@ -621,6 +662,14 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         if tier in ("do", "tell"):
             raise PermissionError(f"the standing rule for this merge is {tier}: merge it at this exact head"
                                   + (", then approvals tell" if tier == "tell" else "") + "; no card was filed")
+    if kind == HOST_KIND:
+        if not host_of(target):
+            raise ValueError("a host target is <verb>:<arg>, like restart:loom-http.service: " + ", ".join(HOST_VERBS))
+        if p["for"] != OWNER:
+            raise PermissionError(HOST_NOT_OWNER.replace(", so this asks", ": no card for anyone else's"))
+        tier = rules_for(who["agent"], kind, [target], p["for"])[target]["tier"]
+        if tier in ("do", "tell"):
+            raise PermissionError(f"the standing rule for {target} is {tier}: the runtime runs it without a card; no card was filed")
     if kind == GRANT_KIND and not grant_of(target):
         raise ValueError("a grant target is <piece>:<agent>, or <piece>:<agent>:<path>,<path> for only those paths "
                          "(a path, or a prefix ending in /*): tasks:mark")
@@ -957,12 +1006,12 @@ STRICT = {"ask": 0, "tell": 1, "do": 2}      # strictest first
 
 def well_formed(r):
     return isinstance(r, dict) and r.get("kind") in RULE_KINDS and r.get("tier") in TIERS \
-        and isinstance(r.get("scope"), str) and valid_scope(r["scope"])
+        and isinstance(r.get("scope"), str) and valid_scope(r["scope"], r["kind"])
 
 
 def well_formed_grant(g):
     """A grant (t-1943): the owner's standing answer for one other person, a rule with a person."""
-    return well_formed(g) and isinstance(g.get("person"), str) and PERSON.fullmatch(g["person"]) is not None
+    return well_formed(g) and g.get("kind") != HOST_KIND and isinstance(g.get("person"), str) and PERSON.fullmatch(g["person"]) is not None
 
 
 def make_grant(person, kind, scope, tier, by):
@@ -971,6 +1020,8 @@ def make_grant(person, kind, scope, tier, by):
         raise ValueError("a grant names a person by their slug, like loren or loren-smith")
     if person == OWNER:
         raise ValueError("owner is the word for your own work (your rules above), not a person to grant")
+    if kind == HOST_KIND:
+        raise ValueError("steps on loom's machine are only ever your own work: there's no grant for them")
     return {"person": person, **make_rule(kind, scope, tier, by)}
 
 
@@ -993,8 +1044,11 @@ def set_grant(person, kind, scope, tier, by):
         return g
 
 
-def valid_scope(scope):
-    """project:<slug>, exactly; or <forge>:<pattern>, where forge is never "project" (that's a project's)."""
+def valid_scope(scope, kind="merge"):
+    """project:<slug>, exactly; or <forge>:<pattern>, where forge is never "project" (that's a project's). A host rule's:
+    host:<verb>[:<arg pattern>] (HOST_SCOPE)."""
+    if kind == HOST_KIND:
+        return HOST_SCOPE.fullmatch(scope) is not None
     if scope.startswith("project:"):
         return PROJECT_SCOPE.fullmatch(scope) is not None
     return re.fullmatch(rf"{FORGE}:{LOCATOR}", scope) is not None
@@ -1004,11 +1058,18 @@ def make_rule(kind, scope, tier, by):
     if kind not in RULE_KINDS:
         raise ValueError(f"only {', '.join(RULE_KINDS)} has standing rules")
     scope = str(scope or "").strip()
-    if ":" in scope and not scope.startswith("project:"):
-        forge, _, loc = scope.partition(":")
-        scope = f"{forge}:{loc.lower()}"
-    if not valid_scope(scope):
-        raise ValueError("a scope is a repo pattern like github:acme/* or github:acme/app, or a project like project:pond")
+    if kind == HOST_KIND:
+        # Said with or without its host: prefix; a unit's or piece's name is matched as written.
+        scope = scope if scope.startswith("host:") else f"host:{scope}"
+        if not valid_scope(scope, kind) or any(x == ".." for x in scope.split("/")):
+            raise ValueError("a step is a verb (restart), or a verb and what it's for (restart:loom-http.service, "
+                             f"pieces-update:*): {', '.join(HOST_VERBS)}")
+    else:
+        if ":" in scope and not scope.startswith("project:"):
+            forge, _, loc = scope.partition(":")
+            scope = f"{forge}:{loc.lower()}"
+        if not valid_scope(scope):
+            raise ValueError("a scope is a repo pattern like github:acme/* or github:acme/app, or a project like project:pond")
     if tier not in TIERS:
         raise ValueError("a tier is do (just do it), tell (tell me after) or ask (ask me)")
     return {"kind": kind, "scope": scope, "tier": tier, "by": by or "owner", "at": iso(now())}
@@ -1086,6 +1147,35 @@ def resolve(rules, kind, target, cards=None):
     return hits[0][1]["tier"], hits[0][1], None
 
 
+def resolve_host(rules, target):
+    """Which host rule applies to TARGET (<verb>:<arg>): (tier or "none", rule or None, note). Most specific wins: the
+    exact step, then a pattern for that verb with fewer *, then the verb alone; at a tie the stricter tier. No rule:
+    "none", and the runtime runs the verb at its own tier (reads do, changes ask)."""
+    h = host_of(target)
+    if not h:
+        raise ValueError("a host target is <verb>:<arg>, like restart:loom-http.service: " + ", ".join(HOST_VERBS))
+    hits = []
+    for rule in rules:
+        if rule.get("kind") != HOST_KIND:
+            continue
+        m = HOST_SCOPE.fullmatch(rule.get("scope", ""))
+        if not m or m.group(1) != h["verb"]:
+            continue
+        pat = m.group(2)
+        if pat is None:
+            hits.append(((3, 0), rule))
+        elif glob_match(pat, h["arg"]):
+            stars = pat.count("*")
+            hits.append(((0, 0) if stars == 0 else (2, stars), rule))
+    if not hits:
+        return "none", None, None
+    hits.sort(key=lambda x: (x[0], STRICT[x[1]["tier"]]))
+    return hits[0][1]["tier"], hits[0][1], None
+
+
+HOST_NOT_OWNER = "a step on loom's machine is only ever the owner's own work, so this asks"
+
+
 def needs_cards(rules):
     return any(r.get("scope", "").startswith("project:") for r in rules)
 
@@ -1108,7 +1198,14 @@ def rules_for(agent, kind, targets, principal=OWNER, people=()):
     cards = projects() if needs_cards(rules) else []
     out = {}
     for t in targets:
-        if principal == UNKNOWN:
+        if kind == HOST_KIND:
+            if principal != OWNER:
+                if not host_of(t):
+                    resolve_host([], t)        # says what a host target is
+                tier, rule, note = "ask", None, HOST_NOT_OWNER
+            else:
+                tier, rule, note = resolve_host(rules, t)
+        elif principal == UNKNOWN:
             if not repo_of(t):
                 raise ValueError("a merge target is <forge>:<locator>#<n>@<40-hex head>, like github:acme/app#12@…")
             tier, rule, note = "ask", None, UNKNOWN_NOTE
@@ -1120,7 +1217,7 @@ def rules_for(agent, kind, targets, principal=OWNER, people=()):
     return out
 
 
-def rule_answer(caller, kind, targets, agent=None, as_json=False, statement=None):
+def rule_answer(caller, kind, targets, agent=None, as_json=False, statement=None, acting_for=False, on_behalf=None):
     """`rule merge TARGET…`: for the asking agent, or (loom's machine only) --for another agent, as the owner's own
     work (the Changes piece shows the owner his own rules). On whose behalf decides which rules: rules_for."""
     if agent and caller:
@@ -1130,7 +1227,7 @@ def rule_answer(caller, kind, targets, agent=None, as_json=False, statement=None
     who = {"agent": agent} if agent else who_of(caller)
     # --for (loom's machine): the Changes piece's view, as any call here is: the statement if there is one, else
     # APPROVALS_LOCAL_PRINCIPAL; a local body is never the owner for being here.
-    p = principal_for_call(caller, who, statement)
+    p = principal_for_call(caller, who, statement, acting_for, on_behalf)
     res = rules_for(who["agent"], kind, targets, p["for"], p.get("people") or ())
     if agent and p["for"] == OWNER:
         # The Changes piece's view (t-1956): a merge the agent asked for someone else isn't the owner's own work, so his
@@ -1389,10 +1486,11 @@ def grant(kind, target, agent, by, deny=False, person=OWNER):
         return a
 
 
-def tell(caller, kind, target, what, statement=None):
-    """After merging under a do or tell rule (or grant): an FYI for the owner (the manifest's notices)."""
+def tell(caller, kind, target, what, statement=None, acting_for=False, on_behalf=None):
+    """After merging under a do or tell rule (or grant): an FYI for the owner (the manifest's notices). A host step's
+    (t-2104): the runtime, before it runs a tell-tier step (--as the body, --on-behalf owner)."""
     who = who_of(caller)
-    p = principal_for_call(caller, who, statement)
+    p = principal_for_call(caller, who, statement, acting_for, on_behalf)
     if len(plain(what, 10**6)) > WORDS_MAX:
         raise ValueError(f"--what is {WORDS_MAX} characters at most as shown; say it shorter")
     what = plain(what, WORDS_MAX)
@@ -1400,6 +1498,8 @@ def tell(caller, kind, target, what, statement=None):
         raise ValueError("--what says what was merged, for the owner")
     r = rules_for(who["agent"], kind, [target], p["for"], p.get("people") or ())[target]
     tier, note = r["tier"], r.get("note")
+    if kind == HOST_KIND and tier != "tell" and tier != "do":
+        raise PermissionError(note or f"no do or tell rule covers {target}: it asks")
     if tier == "ask":
         raise PermissionError(f"{note}: request a merge approval instead" if note else
                               f"the rule for {target.split('@')[0]} is ask me: request a merge approval instead")
@@ -1423,7 +1523,8 @@ STATE_WORDS = {"pending": "Waiting on you", "allowed": "Allowed", "used": "Used"
 # The kinds the clock piece files, plus any the instance names (APPROVALS_KINDS).
 KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent", "merge": "A merge",
               "grant": "Access to a piece", "vouch-wake": "Scheduled jobs counted as yours",
-              "principal-reset": "A conversation counted as yours", "box-write-off": "Work moved off a silent box"}
+              "principal-reset": "A conversation counted as yours", "box-write-off": "Work moved off a silent box",
+              "host": "A step on loom's machine"}
 try:
     _extra = json.loads(setting("APPROVALS_KINDS", "{}"))
     KIND_WORDS.update({k: v for k, v in _extra.items() if KIND.match(str(k)) and isinstance(v, str)} if isinstance(_extra, dict) else {})
@@ -1473,6 +1574,10 @@ def notices():
 
 def notice_of(n):
     tgt = n.get("target", "")
+    if n.get("kind") == HOST_KIND and host_of(tgt):
+        step = host_words(tgt).rstrip("?")
+        return {"text": f"{name_of(n.get('agent'))}: {step[:1].lower()}{step[1:]}", "meta": n.get("what") or "under a tell me after rule",
+                "at": n["at"], "agent": n.get("agent"), "page": ""}
     r = repo_of(tgt)
     change = f"{r['locator']}#{r['number']}" if r else tgt.split("@")[0]
     whose = f" for {person_name(n['for'])}" if n.get("for") and n["for"] != OWNER else ""
@@ -1531,6 +1636,9 @@ def fine_print(a):
         w = writeoff_of(a["target"])
         return (f"Work moved off a silent box, {from_of(a)}. Allowing it writes off {name_of(w['agent'])}'s houses on box "
                 f"{w['box']}: the runtime applies it at once, as you, and their conversations go on elsewhere.")[:FINE_MAX]
+    if a.get("kind") == HOST_KIND and host_of(a.get("target")):
+        return (f"A step on loom's machine, {from_of(a)}. Allowing it lets loom's runtime run exactly {a['target']} once, "
+                f"within {a['minutes']} min, through its fixed host steps (no shell, no model). Only you answer these.")[:FINE_MAX]
     fw = for_words(a)
     named = a.get("people") or []
     everyone = f" ({', '.join(person_name(p) for p in named)})" if len(named) > 3 else ""
@@ -1571,7 +1679,7 @@ def ui_manifest():
                     *([{"action": "every-time", "label": EVERY_TIME, "fields": {"id": a["id"]}}] if every_time_ok(a) else []),
                     {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}],
     } for a in pending], "answered": [{
-        "text": (headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_APPLIED else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
+        "text": (headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_ANSWERED else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
         "outcome": OUTCOME[a["state"]] + (f" ({'Allowed' if a['state'] != 'denied' else 'Denied'} by {a['by']}.)" if a.get("by") else ""),
         "at": a.get("used") or a.get("decided") or a["at"], "kind": "permission", "agent": a["who"]["agent"], "page": "",
     } for a in done], "notices": [notice_of(n) for n in notices()[:20]]}
@@ -1726,7 +1834,7 @@ def ui_page(req):
         sections.append(rules_section(cards))
     if past:
         sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
-            "ref": a["id"], "text": headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_APPLIED else f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
+            "ref": a["id"], "text": headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_ANSWERED else f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
             "tone": {"denied": "bad", "expired": "muted", "withdrawn": "muted"}.get(a["state"]),
         } for a in past]}]})
     if rows:
@@ -1757,9 +1865,48 @@ def scope_words(scope, cards):
     return (f"Everything in {m.group(1)}" if m else pat) + where
 
 
+HOST_TIER_DETAIL = {"do": "Runs when a body asks, without asking you", "tell": "Runs when a body asks, then tells you",
+                    "ask": "Asks you each time"}
+HOST_VERB_WORDS = {"unit-status": "Reading a service's status", "journal": "Reading a service's log",
+                   "art-chain-check": "Art's wake-chain check", "read": "Reading the runtime's logs",
+                   "deploy-loom": "Deploying loom", "pieces-update": "Updating a piece", "restart": "Restarting a service"}
+
+
+def host_scope_words(scope):
+    """A host rule's scope as people say it: "Restarting a service: loom-http", "Updating a piece: any"."""
+    m = HOST_SCOPE.fullmatch(scope)
+    if not m:
+        return scope
+    what = m.group(2)
+    return f"{HOST_VERB_WORDS[m.group(1)]}: " + ("any" if what is None or what == "*" else what.removesuffix(".service"))
+
+
+def host_rules_panel():
+    """The owner's rules for steps on loom's machine (t-2104): per verb, or per verb and what it's for. With none, a
+    step runs at its own tier: reads just run, changes ask him."""
+    with Store() as s:
+        rules = [r for r in s.rules() if r["kind"] == HOST_KIND]
+    rows = [{
+        "label": host_scope_words(r["scope"]), "value": TIER_WORDS[r["tier"]], "detail": HOST_TIER_DETAIL[r["tier"]],
+        **({"tone": "warn"} if r["tier"] == "ask" else {}),
+        "choice": {"action": "rule", "name": "tier", "value": r["tier"], "fields": {"scope": r["scope"], "kind": HOST_KIND},
+                   "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS] + [{"value": "none", "label": "No rule"}]},
+    } for r in sorted(rules, key=lambda r: (STRICT[r["tier"]], r["scope"]))]
+    rows.append({"label": "Add a rule for a step", "value": "Deploys, piece updates, restarts, reads",
+                 "edit": {"action": "host-rule-add", "title": "Add a rule for a step on loom's machine", "submit": "Add the rule",
+                          "note": "A step (pieces-update), or a step and what it's for (restart:loom-http, "
+                                  "pieces-update:runtime, read:allocator-*). The most specific rule wins; with none, "
+                                  "reading just runs and anything that changes loom's machine asks you.",
+                          "fields": [{"name": "scope", "label": "For", "kind": "text", "required": True,
+                                      "hint": "deploy-loom or restart:loom-http"},
+                                     {"name": "tier", "label": "Then", "kind": "segmented", "value": "ask",
+                                      "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS]}]}})
+    return {"type": "panel", "title": "Steps on loom's machine", "rows": rows}
+
+
 def rules_section(cards):
     with Store() as s:
-        rules = list(s.rules())
+        rules = [r for r in s.rules() if r["kind"] == "merge"]
     rows = [{
         "label": scope_words(r["scope"], cards), "value": TIER_WORDS[r["tier"]], "detail": TIER_DETAIL[r["tier"]],
         "tone": "warn" if r["tier"] == "ask" else None,
@@ -1777,7 +1924,7 @@ def rules_section(cards):
                                       "hint": "github:acme/* or project:pond"},
                                      {"name": "tier", "label": "Then", "kind": "segmented", "value": "ask",
                                       "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS]}]}})
-    blocks = [{"type": "panel", "title": "Merging, for you", "rows": rows}, grants_panel(cards), standing_panel()]
+    blocks = [{"type": "panel", "title": "Merging, for you", "rows": rows}, grants_panel(cards), host_rules_panel(), standing_panel()]
     return {"id": "rules", "title": "Standing rules", "fold": "open", "blocks": blocks}
 
 
@@ -1864,13 +2011,21 @@ def caller_who(req):
 def ui_act(req):
     action = (req or {}).get("action")
     f = (req or {}).get("fields") or {}
-    if action in ("rule", "rule-add"):
+    if action in ("rule", "rule-add", "host-rule-add"):
         if not is_owner(req):
             return {"ok": False, "message": "Standing rules are the household owner's.", "page": ""}
+        kind = HOST_KIND if action == "host-rule-add" else (f.get("kind") or "merge")
+        if action == "rule-add" and kind != "merge":
+            return {"ok": False, "message": "That form adds a merge rule.", "page": ""}
+        if f.get("tier") not in (*TIERS, "none"):
+            return {"ok": False, "message": "a tier is do (just do it), tell (tell me after) or ask (ask me)", "page": ""}
         try:
-            r = set_rule(f.get("kind") or "merge", f.get("scope"), f.get("tier"), caller_who(req))
+            r = set_rule(kind, f.get("scope"), f.get("tier"), caller_who(req))
         except ValueError as e:
             return {"ok": False, "message": str(e), "page": ""}
+        if kind == HOST_KIND:
+            return {"ok": True, "message": f"{host_scope_words(r['scope'])}: " + ("no rule now, so it runs at its own tier"
+                    if f.get("tier") == "none" else TIER_WORDS[r["tier"]].lower()), "page": ""}
         words = scope_words(r["scope"], projects() if r["scope"].startswith("project:") else [])
         return {"ok": True, "message": f"{words}: " + ("no rule now, so it asks" if f.get("tier") == "none" else TIER_WORDS[r["tier"]].lower()), "page": ""}
     if action in ("grant", "grant-add"):
@@ -1920,10 +2075,11 @@ def ui_act(req):
         return {"ok": False, "message": "That isn't an approval.", "page": ""}
     try:
         k = get(aid)["kind"]
-        if k in OWNER_APPLIED and not is_owner(req):
+        if k in OWNER_ANSWERED and not is_owner(req):
             # The household's pieces are its owner's to give (t-1970), and whose work a wake or a conversation is, his to
-            # say (t-1975): an agent's owner answers its other asks, not these.
+            # say (t-1975); loom's machine is his (t-2104): an agent's owner answers its other asks, not these.
             return {"ok": False, "message": "Access to a piece is the household owner's to give or refuse." if k == GRANT_KIND
+                    else "Only the household owner says yes to a step on loom's machine." if k == HOST_KIND
                     else "Only the household owner says whose work this is.", "page": ""}
         a = answer(aid, action, caller_who(req))
     except (LookupError, PermissionError) as e:
@@ -2033,9 +2189,13 @@ def run(argv, caller=None):
     ru.add_argument("targets", nargs="+")
     ru.add_argument("--for", dest="for_", default="")
     ru.add_argument("--json", action="store_true")
+    ru.add_argument("--as", dest="as_", default="")
+    ru.add_argument("--on-behalf", dest="on_behalf", default="")
     t = sub.add_parser("tell", add_help=False, exit_on_error=False)
     for fl in ("--kind", "--target", "--what"):
         t.add_argument(fl, default="")
+    t.add_argument("--as", dest="as_", default="")
+    t.add_argument("--on-behalf", dest="on_behalf", default="")
     g = sub.add_parser("grant", add_help=False, exit_on_error=False)
     for fl in ("--kind", "--target", "--by"):
         g.add_argument(fl, default="")
@@ -2052,7 +2212,8 @@ def run(argv, caller=None):
     # A local wake's card is the clock's too (t-2013): Allow every time makes it standing, so a body on loom's machine
     # never files one in its own words, or for whom it likes.
     piece_kind = (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
-    if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd == "standing"
+    if body_here and ((a.cmd == "use" and a.kind in PIECE_SPENT) or piece_kind or a.cmd == "standing"
+                      or (a.cmd in ("rule", "tell") and a.as_)
                       or (a.cmd == "withdraw" and a.as_ is not None)):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's
@@ -2076,7 +2237,12 @@ def run(argv, caller=None):
             raise PermissionError("standing is for the clock on loom's machine, acting for a body (--as)")
         if not a.check and not a.on_behalf:
             raise PermissionError("standing says on whose behalf the wake is set (--on-behalf)")
-    if a.cmd in ("request", "use", "check", "withdraw", "standing") and a.as_:
+    if a.cmd == "tell" and a.kind == HOST_KIND and not a.as_:
+        # The runtime's, as it runs a tell-tier step: never a body's own words that a step on loom's machine ran.
+        raise PermissionError("a host step's notice is the runtime's, on loom's machine (--as the body, --on-behalf owner)")
+    if a.cmd == "rule" and a.as_ and a.for_:
+        raise ValueError("rule takes --as or --for, not both")
+    if a.cmd in ("request", "use", "check", "withdraw", "standing", "rule", "tell") and a.as_:
         # A piece on loom's machine acting for a body (the clock filing or spending a house's
         # approval) names it with --as; only a local call may say so.
         if caller:
@@ -2121,11 +2287,12 @@ def run(argv, caller=None):
             unstated=bool(a.as_) and not a.on_behalf and a.kind == GRANT_KIND)
         return f"{a.id}: used\n"
     if a.cmd == "rule":
-        return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement)
+        return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement,
+                           acting_for=bool(a.as_), on_behalf=a.on_behalf or None)
     if a.cmd == "tell":
-        if a.kind not in RULE_KINDS or not repo_of(a.target):
+        if not ((a.kind == "merge" and repo_of(a.target)) or (a.kind == HOST_KIND and host_of(a.target))):
             raise ValueError("tell --kind merge --target <forge>:<locator>#<n>@<head> --what \"…\"")
-        n = tell(caller, a.kind, a.target, a.what, statement=statement)
+        n = tell(caller, a.kind, a.target, a.what, statement=statement, acting_for=bool(a.as_), on_behalf=a.on_behalf or None)
         return f"told the owner: {notice_of(n)['text']}\n"
     if a.cmd == "grant":
         # The owner's answer, from loom's machine only (the Changes piece's Yes and Not yet): never a body's.

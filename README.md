@@ -234,6 +234,34 @@ approvals grant --kind merge --target <same> --for AGENT --by MEMBER [--person S
 - A rule never grants a write a guard would refuse: it only says whether to
   ask the owner.
 
+## Steps on loom's machine
+
+A body doing its owner's own work can ask loom's runtime for a fixed set of steps on loom's machine (loom-box
+`loom runtime host`, t-2096): `unit-status`, `journal`, `read`, `art-chain-check`, `deploy-loom`, `pieces-update` and
+`restart`. Each step's target is `<verb>:<arg>` (`restart:loom-http.service`, `pieces-update:runtime`). The owner sets
+standing rules for them on the page's **Steps on loom's machine** panel (t-2104):
+
+```
+approvals rule host <verb>:<arg> --as BODY --on-behalf owner        do | tell | ask | none   (the runtime)
+approvals tell --kind host --target <verb>:<arg> --what "…" --as BODY --on-behalf owner      (the runtime)
+approvals use a-… --kind host --target <verb>:<arg> --as BODY --on-behalf owner              (the runtime)
+approvals request --kind host --target <verb>:<arg> --ask … --why … --if-yes … --if-no …    (a body)
+```
+
+- **A scope** is a verb (`host:restart`, every restart) or a verb and what it's for (`host:restart:loom-http.service`,
+  or a pattern, `host:restart:loom-piece-*`). The exact step wins, then a pattern with fewer `*`, then the verb alone;
+  the stricter at a tie. With no rule, `rule host` answers `none` and the runtime runs the step at its own tier: reads
+  just run, changes ask.
+- **Only the owner's own work.** The rules are his; for anyone else `rule host` answers `ask`, a card for anyone else
+  is refused, and there are no grants for host steps.
+- **The card names the step** in the piece's words, from its target ("Restart loom-http on loom's machine?"); the
+  body's own ask is the detail under it. **Only the household owner answers it**: an agent's owner who isn't the
+  household's can't.
+- **Only the runtime spends it** (`--as` from loom's machine), in the step that runs it: a body's own `use` would burn
+  the owner's yes and run nothing, so it's refused, over the API or from a body on loom's machine. Likewise `tell
+  --kind host` is the runtime's alone, and only under a do or tell rule.
+- A step the rules answer (`do` or `tell`) files no card.
+
 ## Standing jobs
 
 A house's job that needs loom's machine (`<!-- house: local -->`) asks every time it's set: a single-use approval for
