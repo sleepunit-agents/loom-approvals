@@ -13,6 +13,11 @@
                                 spend an allowed approval: once, for exactly that kind and target
     approvals withdraw ID --as AGENT_JSON
                                 loom's machine only: a piece takes back its own pending card (vouch-wake, …)
+    approvals standing --kind local-wake --target TARGET --as AGENT_JSON --on-behalf WHOM
+                                loom's machine only (the clock, t-2013): the owner's standing job for exactly this
+                                agent, target and principal ("s-…: standing"), counted as a use; exit 1 if none
+    approvals standing --check s-… --as AGENT_JSON
+                                on | off | none: whether that standing job is still on
     approvals list              the recent ones (the owner's view, on loom's machine)
 
 Standing rules (loom docs/specs/changes.md): the owner's lasting answer for merging, per repo pattern or project.
@@ -329,7 +334,7 @@ class Store:
             self.d = json.loads(self.path.read_text())
         except (OSError, ValueError):
             self.d = {"v": 1, "approvals": {}}
-        self._rules, self._grants = None, []
+        self._rules, self._grants, self._standing = None, [], []
         return self
 
     def save(self):
@@ -348,7 +353,7 @@ class Store:
             return self._rules
         path = STATE / "rules.json"
         self.rules_broken = False
-        self._grants = []
+        self._grants, self._standing = [], []
         try:
             doc = json.loads(path.read_text())
             rows = doc["rules"]
@@ -364,11 +369,18 @@ class Store:
             self._grants = [g for g in grants if well_formed_grant(g)]
             if len(self._grants) != len(grants):
                 self.rules_broken = True
+            # The owner's standing jobs (t-2013): his "Allow every time" on a local wake's card. None yet is none.
+            standing = doc.get("standing", [])
+            if not isinstance(standing, list):
+                raise TypeError("standing isn't a list")
+            self._standing = [j for j in standing if well_formed_standing(j)]
+            if len(self._standing) != len(standing):
+                self.rules_broken = True
         except FileNotFoundError:
             self._rules = seed_rules()
-            self.write_json(path, {"v": 1, "rules": self._rules, "grants": []})
+            self.write_json(path, {"v": 1, "rules": self._rules, "grants": [], "standing": []})
         except (OSError, ValueError, KeyError, TypeError):
-            self._rules, self._grants, self.rules_broken = [], [], True
+            self._rules, self._grants, self._standing, self.rules_broken = [], [], [], True
         return self._rules
 
     def grants(self):
@@ -377,14 +389,22 @@ class Store:
         self.rules()
         return self._grants
 
-    def replace_rules(self, rules, grants=None):
-        self.rules()        # the grants are read with the rules: an edit of one never writes the other away
+    def standing(self):
+        """The owner's standing jobs (rules.json's "standing", t-2013), read with the rules. A file that can't be read
+        has none, so every local wake asks (fails closed)."""
+        self.rules()
+        return self._standing
+
+    def replace_rules(self, rules, grants=None, standing=None):
+        self.rules()        # the grants and standing jobs are read with the rules: an edit of one never writes another away
         if self.rules_broken:
             raise ValueError("rules.json can't be read as it is; fix or remove it on loom's machine before changing a rule")
         self._rules = rules
         if grants is not None:
             self._grants = grants
-        self.write_json(STATE / "rules.json", {"v": 1, "rules": self._rules, "grants": self._grants})
+        if standing is not None:
+            self._standing = standing
+        self.write_json(STATE / "rules.json", {"v": 1, "rules": self._rules, "grants": self._grants, "standing": self._standing})
 
     @staticmethod
     def write_json(path, obj):
@@ -548,7 +568,13 @@ def principal_for_call(caller, who, statement=None, acting_for=False, on_behalf=
     """On whose behalf this call is. A piece on loom's machine acting for a body (--as) may say it (--on-behalf: the
     clock, whom the wake is for); otherwise the runtime's statement, or loom's machine's own setting, or unknown."""
     if acting_for and on_behalf:
-        return {"for": on_behalf if on_behalf == OWNER or PERSON.fullmatch(on_behalf) else UNKNOWN, "people": []}
+        if on_behalf == OWNER or PERSON.fullmatch(on_behalf):
+            return {"for": on_behalf, "people": []}
+        # Someone loom can't name, with the people the runtime named (t-2013): "?:eve,dan". So a card asked while Eve
+        # steered is never one for Dan's, nor for a body nobody named.
+        m = re.fullmatch(r"[-?]:([a-z0-9-]+(?:,[a-z0-9-]+){0,19})", on_behalf)
+        people = sorted({x for x in m.group(1).split(",") if PERSON.fullmatch(x)}) if m else []
+        return {"for": UNKNOWN, "people": people}
     return principal_of(who, statement, local=caller is None)
 
 
@@ -564,7 +590,7 @@ CONVERSATION = re.compile(r"cv-[0-9a-f]{12}")
 
 
 def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask=None, if_yes=None, if_no=None, details=None,
-            conversation=None, statement=None, on_behalf=None):
+            conversation=None, statement=None, on_behalf=None, digest=None):
     who = who_of(caller)
     # On whose behalf (t-1943): kept on the card, which names them, and what it may be spent for.
     p = principal_for_call(caller, who, statement, acting_for, on_behalf)
@@ -579,6 +605,11 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
     if kind in PIECE_KINDS and not acting_for:
         raise PermissionError(f"a {kind} approval is filed by the piece on loom's machine for its body (--as), not by a body")
     target = exact_target(target)
+    # A local wake's whole words, as the clock hashed them (sha256, t-2013): its target is only their first 16 hex digits,
+    # and a standing job matches on all of them, so two prompts made to share a short hash never pass for each other.
+    if digest is not None and (kind != STANDING_KIND or not acting_for or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                               or target.split(":", 1)[-1] != digest[:16]):
+        raise ValueError("--digest is the clock's: a local wake's whole sha256, of which its target is the first 16 hex")
     if kind == "merge" and not repo_of(target):
         raise ValueError("a merge target is literal: <forge>:<owner>/<repo>#<n>@<40-hex head>, letters, digits, . _ - only")
     if kind == GRANT_KIND and not grant_of(target):
@@ -684,6 +715,7 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
              # Kept with the agent loom authenticated: the pair is what a thread checks (see request's note).
              **({"conversation": conversation} if conversation else {}),
              "who": who, "for": p["for"], **({"people": p["people"]} if p["people"] else {}),
+             **({"digest": digest} if digest else {}),
              "minutes": mins, "at": iso(now()), "state": "pending"}
         s.d["approvals"][a["id"]] = a
         s.save()
@@ -1149,6 +1181,154 @@ def always(aid, by, cards):
         return a, al
 
 
+# ---------------------------------------------------------------- standing jobs (t-2013)
+# Jonathan, 2026-11-09: "yes, this regular job runs on this box as me, and that is it." A house's local wake asks every
+# time it's set (a single-use approval for exactly its words). On its card the owner may instead say Allow every time:
+# a standing job, kept beside his rules, for exactly that agent, those words (the card's target, a hash of them), and
+# whom it was set for, run on loom's machine as him. The clock asks here (approvals standing) before it files a card;
+# a match sets the wake with no card, and each use is counted and logged. He turns it off on this page, and the next
+# time the job is set it asks again. Only the household owner sets or turns one off; nothing a body says makes one.
+STANDING_KIND = "local-wake"
+STANDING_TARGET = re.compile(rf"({GRANT_NAME}):[0-9a-f]{{16}}")
+SID = re.compile(r"s-[0-9a-f]{8}")
+STANDING_MAX = 50       # standing jobs on at once
+STANDING_KEEP = 100     # kept in all, those turned off included (the newest)
+
+
+def well_formed_standing(j):
+    """A standing job as rules.json keeps it: its id, the local wake's exact target, the agent its words are for, and
+    the principal it was set for. Anything else is dropped, and the file marked broken, so it asks."""
+    if not isinstance(j, dict) or not SID.fullmatch(str(j.get("id", ""))) or j.get("kind") != STANDING_KIND:
+        return False
+    m = STANDING_TARGET.fullmatch(str(j.get("target", "")))
+    who = j.get("who")
+    f, off, uses = j.get("for"), j.get("off"), j.get("uses", 0)
+    d = str(j.get("digest", ""))
+    return bool(m) and m.group(1) == j.get("agent") and isinstance(who, dict) and who.get("agent") == j.get("agent") \
+        and re.fullmatch(r"[0-9a-f]{64}", d) is not None and d[:16] == j["target"].split(":", 1)[1] \
+        and isinstance(f, str) and (f in (OWNER, UNKNOWN) or PERSON.fullmatch(f) is not None) \
+        and is_iso(j.get("at")) and ("used" not in j or is_iso(j["used"])) \
+        and isinstance(j.get("what", ""), str) and isinstance(j.get("details", ""), str) \
+        and isinstance(uses, int) and not isinstance(uses, bool) and uses >= 0 \
+        and (off is None or (isinstance(off, dict) and is_iso(off.get("at"))))
+
+
+def is_iso(t):
+    """A time as this piece writes it (iso): anything else, on a row read back, isn't one of ours."""
+    try:
+        datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ")
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def every_time_ok(a):
+    """Whether a pending card may be allowed every time: a local wake's, filed by the clock for the agent its target
+    names, for the owner's own work or for someone loom can't name (Jonathan's "as me": it runs as him). A card for a
+    named person isn't: that would be a standing yes for them, which is a grant, not this."""
+    m = STANDING_TARGET.fullmatch(str(a.get("target", "")))
+    # Only loom's machine's own agent: another agent's local wake runs in its house, and its clock never asks.
+    if a.get("kind") != STANDING_KIND or state_of(a) != "pending" or not m or m.group(1) != a["who"].get("agent") \
+            or m.group(1) != LOCAL_AGENT:
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", str(a.get("digest", ""))):
+        return False        # filed before the clock said its whole words' hash: it asks once more, then it can stand
+    if for_of(a) == OWNER:
+        return True
+    # Someone loom can't name: only from one of the agent's plain houses, with nobody named. A chat house's (others steer
+    # it) or one that names people would be a standing yes for them, run as the owner, as often as they set it.
+    return for_of(a) == UNKNOWN and not a.get("people") and service_of(a["who"]) is None
+
+
+def standing_on(j):
+    return not j.get("off")
+
+
+def allow_every_time(aid, by):
+    """Allow every time on a pending local wake's card: this one allowed and a standing job recorded, under one lock,
+    so neither happens without the other. The same job already on is kept, not doubled."""
+    with Store() as s:
+        a = s.d["approvals"].get(aid)
+        if not a:
+            raise LookupError("no such approval")
+        if state_of(a) != "pending":
+            raise PermissionError(f"it's already {state_of(a)}")
+        if not every_time_ok(a):
+            raise ValueError("Allow every time is for a job on loom's machine, for you or for someone loom can't name")
+        rows = list(s.standing())
+        same = next((j for j in rows if standing_on(j) and j["agent"] == a["who"]["agent"] and j["digest"] == a["digest"]
+                     and j["who"] == a["who"] and same_principal(j, {"for": for_of(a), "people": a.get("people") or []})), None)
+        t = now()
+        if not same:
+            if sum(1 for j in rows if standing_on(j)) >= STANDING_MAX:
+                raise ValueError(f"{STANDING_MAX} standing jobs at most: turn one off first")
+            same = {"id": "s-" + secrets.token_hex(4), "kind": STANDING_KIND, "agent": a["who"]["agent"],
+                    "target": a["target"], "digest": a["digest"], "who": a["who"], "for": for_of(a),
+                    **({"people": a["people"]} if a.get("people") else {}),
+                    "from": aid, "what": a.get("what", ""), **({"details": a["details"]} if a.get("details") else {}),
+                    "at": iso(t), "uses": 0, **({"by": by} if by else {})}
+            on = [j for j in rows if standing_on(j)]
+            rows = on + [same] + [j for j in rows if not standing_on(j)][:max(0, STANDING_KEEP - len(on) - 1)]
+        a["state"], a["decided"] = "allowed", iso(t)
+        if by:
+            a["by"] = by
+        a["expires"] = iso(datetime.fromtimestamp(t.timestamp() + a["minutes"] * 60, timezone.utc))
+        s.replace_rules(list(s.rules()), standing=rows)
+        s.save()
+        s.log("allow", a, standing=same["id"])
+        return a, same
+
+
+def standing_off(sid, by):
+    """The owner turns a standing job off: kept, marked off, so the job asks again the next time it's set and a wake
+    set under it before doesn't fire (the clock checks at fire time)."""
+    if not SID.fullmatch(str(sid or "")):
+        raise ValueError("That isn't a standing job.")
+    with Store() as s:
+        rows = list(s.standing())
+        j = next((x for x in rows if x["id"] == sid), None)
+        if not j:
+            raise LookupError("no such standing job")
+        if not standing_on(j):
+            return j
+        j["off"] = {"at": iso(now()), **({"by": by} if by else {})}
+        s.replace_rules(list(s.rules()), standing=rows)
+        s.log("standing-off", j, **({"by": by} if by else {}))
+        return j
+
+
+def standing_match(caller, kind, target, on_behalf, digest=None):
+    """The clock, before it files a local wake's card: the owner's standing job for exactly this agent, target and
+    principal, from where this body may spend what it asked (may_spend), or None. A match is a use: counted and logged."""
+    who = who_of(caller)
+    target = exact_target(target)
+    if kind != STANDING_KIND or not re.fullmatch(r"[0-9a-f]{64}", str(digest or "")):
+        return None
+    p = principal_for_call(caller, who, None, True, on_behalf)
+    with Store() as s:
+        rows = list(s.standing())
+        j = next((x for x in rows if standing_on(x) and x["agent"] == who["agent"] and x["target"] == target and x["digest"] == digest
+                  and may_spend(x["who"], who) and same_principal(x, p)), None)
+        if not j:
+            return None
+        j["uses"], j["used"] = int(j.get("uses") or 0) + 1, iso(now())
+        s.replace_rules(list(s.rules()), standing=rows)
+        s.log("standing-use", j, asked_from=who, **({"for_set": p["for"]} if p["for"] != OWNER else {}))
+        return j
+
+
+def standing_state(caller, sid):
+    """on | off | none, for the agent the job is for: the clock asks before it fires a wake set under one."""
+    who = who_of(caller)
+    with Store() as s:
+        j = next((x for x in s.standing() if x["id"] == sid), None)
+        broken = s.rules_broken
+    # A rules.json that can't be read whole can't be turned off from the page either: nothing set under it runs.
+    if broken or not j or j["agent"] != who["agent"]:
+        return "none"
+    return "on" if standing_on(j) else "off"
+
+
 def grant(kind, target, agent, by, deny=False, person=OWNER):
     """The owner's answer from loom's machine (the Changes piece's Yes and Not yet): answers the agent's pending
     request for TARGET, or makes the answer for one it hasn't made yet. For the owner's own work unless --person names
@@ -1332,7 +1512,14 @@ def fine_print(a):
     named = a.get("people") or []
     everyone = f" ({', '.join(person_name(p) for p in named)})" if len(named) > 3 else ""
     whose = f" It's for {fw}{everyone}, not for you: it's spent only for {fw}." if fw else ""
-    return f"{kind_of(a)}, {from_of(a)}.{whose} Allowing it lets that one action through once, within {a['minutes']} min."
+    once = f"{kind_of(a)}, {from_of(a)}.{whose} Allowing it lets that one action through once, within {a['minutes']} min."
+    if every_time_ok(a):
+        # What the third button does, in the piece's words (t-2013), when it fits (loom refuses fine print past 400).
+        every = (f" {EVERY_TIME}: these exact words run as you each time {name_of(a['who'].get('agent'))} sets them, "
+                 "until you turn it off under Standing jobs.")
+        # Always said, beside its button: the once-text gives way if both don't fit.
+        once = (once if len(once + every) <= FINE_MAX else once[:FINE_MAX - len(every) - 1].rstrip() + "…") + every
+    return once
 
 
 def ui_manifest():
@@ -1356,7 +1543,9 @@ def ui_manifest():
         "fine": fine_print(a),
         "tone": "warn", "at": a["at"], "agent": a["who"]["agent"], "page": "", "kind": "permission",
         **({"conversation": a["conversation"]} if a.get("conversation") else {}),
+        # Allow every time (t-2013) on a local wake's card: the page refuses it for anyone but the household owner.
         "actions": [{"action": "allow", "label": allow_label(a), "tone": "primary", "fields": {"id": a["id"]}},
+                    *([{"action": "every-time", "label": EVERY_TIME, "fields": {"id": a["id"]}}] if every_time_ok(a) else []),
                     {"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}],
     } for a in pending], "answered": [{
         "text": (headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_APPLIED else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
@@ -1434,11 +1623,16 @@ def allow_label(a):
     return "Allow" if a.get("kind") in OWNER_APPLIED else "Allow once"
 
 
-def answers_of(a, cards=None):
+EVERY_TIME = "Allow every time"
+
+
+def answers_of(a, cards=None, owner=False):
     items = [{"action": "allow", "label": allow_label(a), "tone": "primary", "fields": {"id": a["id"]}}]
     al = always_scope(a, cards) if cards is not None else None
     if al:
         items.append({"action": "always", "label": al[1], "fields": {"id": a["id"]}})
+    if owner and every_time_ok(a):
+        items.append({"action": "every-time", "label": EVERY_TIME, "fields": {"id": a["id"]}})
     return items + [{"action": "deny", "label": "Deny", "tone": "danger", "fields": {"id": a["id"]}}]
 
 
@@ -1496,7 +1690,7 @@ def ui_page(req):
                 *([{"type": "kv", "items": [{"label": "If you allow", "value": {**a, **owner_lines(a)}["if_yes"]},
                                             {"label": "If you deny", "value": {**a, **owner_lines(a)}["if_no"]}]}]
                   if a.get("if_yes") or owner_lines(a) else []),
-                {"type": "buttons", "items": answers_of(a, cards if owner else None)},
+                {"type": "buttons", "items": answers_of(a, cards if owner else None, owner)},
                 *([{"type": "text", "text": a["details"]}] if a.get("details") else []),
                 # A sheet is already folded detail: loom refuses a details block inside one, and with it the page.
                 {"type": "text", "tone": "muted", "text": f"Exactly what this allows: {fine_print(a)}"},
@@ -1560,7 +1754,7 @@ def rules_section(cards):
                                       "hint": "github:acme/* or project:pond"},
                                      {"name": "tier", "label": "Then", "kind": "segmented", "value": "ask",
                                       "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS]}]}})
-    blocks = [{"type": "panel", "title": "Merging, for you", "rows": rows}, grants_panel(cards)]
+    blocks = [{"type": "panel", "title": "Merging, for you", "rows": rows}, grants_panel(cards), standing_panel()]
     return {"id": "rules", "title": "Standing rules", "fold": "open", "blocks": blocks}
 
 
@@ -1588,6 +1782,45 @@ def grants_panel(cards):
                                      {"name": "tier", "label": "Then", "kind": "segmented", "value": "ask",
                                       "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS]}]}})
     return {"type": "panel", "title": "Merging, for other people", "rows": rows}
+
+
+def standing_words(j):
+    """A standing job in words: what it runs, short."""
+    w = what_of(j)
+    return w if len(w) <= 80 else w[:77] + "..."
+
+
+def standing_panel():
+    """The owner's standing jobs (t-2013): what runs, where and as whom, who set it, how often it was used; Turn off."""
+    with Store() as s:
+        rows = list(s.standing())
+    out = []
+    rows.sort(key=lambda j: j.get("used") or j["at"], reverse=True)       # most recently used first, those on first
+    for j in sorted(rows, key=lambda j: not standing_on(j)):
+        on = standing_on(j)
+        by = f"set for {for_words(j)}" if for_words(j) else "set by your own work"
+        uses = int(j.get("uses") or 0)
+        used = f"used {uses} time{'' if uses == 1 else 's'}" + (f", last {ago(j['used'])}" if j.get("used") else "")
+        out.append({
+            "label": standing_words(j), "agent": j["agent"], "value": "Every time" if on else "Turned off",
+            "detail": " · ".join((f"{name_of(j['agent'])}'s, on loom's machine, as you", by, used,
+                                  f"allowed {ago(j['at'])}" + (f", off {ago(j['off'].get('at'))}" if not on else ""))),
+            **({} if on else {"tone": "muted"}),
+            "sheet": {"title": "A standing job", "blocks": [
+                {"type": "text", "text": f"{name_of(j['agent'])} runs this on loom's machine, as you, every time it's set, "
+                                         "with no card. Words that differ by a letter ask you again."},
+                *([{"type": "text", "text": j["details"]}] if j.get("details") else [{"type": "text", "text": what_of(j)}]),
+                *([{"type": "buttons", "items": [{"action": "standing-off", "label": "Turn off", "tone": "danger",
+                                                  "fields": {"id": j["id"]}}]}] if on else []),
+                {"type": "text", "tone": "muted", "text": f"Exactly what it allows: a wake on loom's machine for "
+                                                         f"{j['target']}, {from_of(j)}. Every use is counted here and "
+                                                         "logged. Turned off, wakes already set under it don't run."},
+            ]},
+        })
+    if not out:
+        out.append({"label": "No standing jobs", "value": "Each job on loom's machine asks",
+                    "detail": "Allow every time on a job's card makes one: it then runs with no card until you turn it off."})
+    return {"type": "panel", "title": "Standing jobs", "rows": out}
 
 
 def is_owner(req):
@@ -1628,7 +1861,25 @@ def ui_act(req):
         words = scope_words(g["scope"], projects() if g["scope"].startswith("project:") else [])
         return {"ok": True, "message": f"For {person_name(g['person'])}, {words}: "
                 + ("no grant now, so it asks" if f.get("tier") == "none" else TIER_WORDS[g["tier"]].lower()), "page": ""}
+    if action == "standing-off":
+        if not is_owner(req):
+            return {"ok": False, "message": "Standing jobs are the household owner's.", "page": ""}
+        try:
+            j = standing_off(f.get("id"), caller_who(req))
+        except (LookupError, ValueError) as e:
+            return {"ok": False, "message": str(e), "page": ""}
+        return {"ok": True, "message": f"Turned off: {standing_words(j)}. The next time it's set, it asks you.", "page": ""}
     aid = f.get("id", "")
+    if action == "every-time":
+        if not is_owner(req):
+            return {"ok": False, "message": "Standing jobs are the household owner's.", "page": ""}
+        if not ID.match(str(aid)):
+            return {"ok": False, "message": "That isn't an approval.", "page": ""}
+        try:
+            _, j = allow_every_time(aid, caller_who(req))
+        except (LookupError, PermissionError, ValueError) as e:
+            return {"ok": False, "message": str(e), "page": ""}
+        return {"ok": True, "message": f"Allowed every time: {standing_words(j)}. Turn it off under Standing jobs.", "page": ""}
     if action == "always":
         if not is_owner(req):
             return {"ok": False, "message": "Standing rules are the household owner's.", "page": ""}
@@ -1728,7 +1979,7 @@ def run(argv, caller=None):
     ap = argparse.ArgumentParser(prog="approvals", add_help=False, exit_on_error=False)
     sub = ap.add_subparsers(dest="cmd")
     r = sub.add_parser("request", add_help=False, exit_on_error=False)
-    for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details", "--conversation"):
+    for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details", "--conversation", "--digest"):
         r.add_argument(f, default="")
     r.add_argument("--if-yes", dest="if_yes", default="")
     r.add_argument("--if-no", dest="if_no", default="")
@@ -1748,6 +1999,11 @@ def run(argv, caller=None):
     w.add_argument("id")
     w.add_argument("--as", dest="as_", default="")
     sub.add_parser("list", add_help=False, exit_on_error=False)
+    st = sub.add_parser("standing", add_help=False, exit_on_error=False)
+    for fl in ("--kind", "--target", "--check", "--digest"):
+        st.add_argument(fl, default="")
+    st.add_argument("--as", dest="as_", default="")
+    st.add_argument("--on-behalf", dest="on_behalf", default="")
     ru = sub.add_parser("rule", add_help=False, exit_on_error=False)
     ru.add_argument("kind")
     ru.add_argument("targets", nargs="+")
@@ -1769,8 +2025,10 @@ def run(argv, caller=None):
     if getattr(a, "on_behalf", "") and not a.as_:
         raise PermissionError("--on-behalf is for a piece on loom's machine acting for a body (--as)")
     body_here = bool(os.environ.get("LOOM_BODY_CONVERSATION") or os.environ.get("LOOM_BODY_KEY"))
-    piece_kind = a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS
-    if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd == "withdraw"):
+    # A local wake's card is the clock's too (t-2013): Allow every time makes it standing, so a body on loom's machine
+    # never files one in its own words, or for whom it likes.
+    piece_kind = (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
+    if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd in ("withdraw", "standing")):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's
         # environment; either one refuses). A body that unsets them is past what any piece here can check: loom's machine
@@ -1784,7 +2042,14 @@ def run(argv, caller=None):
         # A piece on loom's machine only, for the body it filed for: never a body over the API.
         if caller or not a.as_:
             raise PermissionError("withdraw is for the piece on loom's machine that filed it (--as)")
-    if a.cmd in ("request", "use", "check", "withdraw") and a.as_:
+    if a.cmd == "standing":
+        # The clock on loom's machine only, for the body it sets the wake for (t-2013): never a body over the API, and
+        # never without saying on whose behalf (a match is for one principal).
+        if caller or not a.as_:
+            raise PermissionError("standing is for the clock on loom's machine, acting for a body (--as)")
+        if not a.check and not a.on_behalf:
+            raise PermissionError("standing says on whose behalf the wake is set (--on-behalf)")
+    if a.cmd in ("request", "use", "check", "withdraw", "standing") and a.as_:
         # A piece on loom's machine acting for a body (the clock filing or spending a house's
         # approval) names it with --as; only a local call may say so.
         if caller:
@@ -1797,7 +2062,7 @@ def run(argv, caller=None):
         x = request(caller, a.kind, a.target, a.what, a.why, int(a.minutes) if a.minutes.isdigit() else None,
                     acting_for=bool(a.as_), ask=a.ask or None, if_yes=a.if_yes or None, if_no=a.if_no or None,
                     details=a.details or None, conversation=a.conversation or None, statement=statement,
-                    on_behalf=a.on_behalf or None)
+                    on_behalf=a.on_behalf or None, digest=a.digest or None)
         if x["state"] == "denied":
             return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
         if x["state"] == "allowed" and x["kind"] == GRANT_KIND:
@@ -1810,6 +2075,13 @@ def run(argv, caller=None):
         return f"{x['id']}: asked the owner (a card on loom's Home); check it: approvals check {x['id']}\n"
     if a.cmd == "withdraw":
         return f"{withdraw(caller, a.id)['id']}: withdrawn\n"
+    if a.cmd == "standing":
+        if a.check:
+            return standing_state(caller, a.check) + "\n"
+        j = standing_match(caller, a.kind, a.target, a.on_behalf, a.digest)
+        if not j:
+            raise LookupError(f"no standing job for {a.kind} {a.target}: it asks")
+        return f"{j['id']}: standing, set by the owner {j['at']}\n"
     if a.cmd == "check":
         if a.json:
             return json.dumps(spend_card(caller, a.id)) + "\n"
@@ -1841,7 +2113,7 @@ def run(argv, caller=None):
         if caller:
             raise PermissionError("the list is the owner's, on loom's machine")
         return "".join(f"{x['id']} {x['state']:<8} {x['kind']} {x['target']} — {x['who']['agent']}: {x['what']}\n" for x in recent()[:30])
-    raise ValueError("request | check | use | withdraw | list | rule | tell | grant")
+    raise ValueError("request | check | use | withdraw | standing | list | rule | tell | grant")
 
 
 # ---------------------------------------------------------------- in a house
