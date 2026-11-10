@@ -261,6 +261,9 @@ approvals request --kind host --target <verb>:<arg> --ask … --why … --if-yes
   the owner's yes and run nothing, so it's refused, over the API or from a body on loom's machine. Likewise `tell
   --kind host` is the runtime's alone, and only under a do or tell rule.
 - A step the rules answer (`do` or `tell`) files no card.
+- **Suggested rules** show on the panel for each verb he hasn't set a rule for, one tap from set and never set for
+  him: reads (`unit-status`, `journal`, `read`) just do it; `deploy-loom` and `pieces-update` tell him after;
+  `restart` and `art-chain-check` ask him. Until he taps one, the step runs at its own tier.
 
 ## Standing jobs
 

@@ -2145,6 +2145,42 @@ class HostSteps(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.rule("deploy-loom:fix"), "none\n")
 
+    def test_suggested_rules_show_until_he_sets_one_and_set_nothing_themselves(self):
+        self.assertEqual(set(ap.HOST_OWN_TIER), set(ap.HOST_VERBS))
+        self.assertEqual({ap.HOST_SCOPE.fullmatch(s).group(1) for s, _ in ap.HOST_SUGGESTED}, set(ap.HOST_VERBS))
+        panel = lambda: next(b for b in ap.ui_page({"path": "", "caller": OWNER})["sections"][1]["blocks"]
+                             if b.get("title") == "Steps on loom's machine")
+        rows = {r["label"]: r for r in panel()["rows"]}
+        dep = rows["Deploying loom: any"]
+        self.assertEqual((dep["value"], dep["choice"]["value"]), ("No rule yet", "none"))
+        self.assertIn("Suggested: Tell me after", dep["detail"])
+        self.assertIn("asks you each time", dep["detail"])
+        self.assertIn("runs without asking", rows["Reading a service's log: any"]["detail"])
+        self.assertIn("Tell me after (suggested)", [o["label"] for o in dep["choice"]["options"]])
+        # Showing them sets nothing: every step still runs at its own tier.
+        self.assertEqual(self.rule("deploy-loom:fix"), "none\n")
+        # His tap on the suggestion is an ordinary rule; the suggestion row goes, the rule row takes its place.
+        r = ap.ui_act({"action": "rule", "caller": OWNER, "fields": dep["choice"]["fields"] | {"tier": "tell"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.rule("deploy-loom:fix"), "tell\n")
+        labels = [(r["label"], r["value"]) for r in panel()["rows"]]
+        self.assertEqual(labels.count(("Deploying loom: any", "Tell me after")), 1)
+        self.assertNotIn(("Deploying loom: any", "No rule yet"), labels)
+        # A rule for every step of a verb, written either way, is his rule for it: no suggestion beside it.
+        self.set("restart:*", "do")
+        self.set("read:allocator-*", "ask")
+        labels = [(r["label"], r["value"]) for r in panel()["rows"]]
+        self.assertNotIn(("Restarting a service: any", "No rule yet"), labels)
+        # A narrower rule leaves the verb's own suggestion standing.
+        self.assertIn(("Reading the runtime's logs: any", "No rule yet"), labels)
+        # Tapping "No rule" on a suggestion writes nothing.
+        r = ap.ui_act({"action": "rule", "caller": OWNER, "fields": {"scope": "host:journal", "kind": "host", "tier": "none"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.rule("journal:loom-http.service"), "none\n")
+        # Not his, no rule: a member's tap on a suggestion is refused like any rule.
+        self.assertFalse(ap.ui_act({"action": "rule", "caller": {"kind": "owner", "who": "sam", "agents": ["ada"]},
+                                    "fields": {"scope": "host:restart", "kind": "host", "tier": "do"}})["ok"])
+
     def test_a_rules_file_that_can_t_be_read_asks_even_for_a_read(self):
         (Path(self.td.name) / "rules.json").write_text("{not json")
         self.assertEqual(self.rule("read:allocator-shadow.jsonl"), "ask\n")
