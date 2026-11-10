@@ -1880,7 +1880,8 @@ HOST_VERB_WORDS = {"unit-status": "Reading a service's status", "journal": "Read
                    "deploy-loom": "Deploying loom", "pieces-update": "Updating a piece", "restart": "Restarting a service"}
 
 
-# Each verb's own tier when no rule says otherwise (loom-box src/hostverbs.mjs VERBS[verb].tier): reads run, changes ask.
+# Each verb's own tier when no rule says otherwise: a copy of loom-box src/hostverbs.mjs VERBS[verb].tier (reads
+# run, changes ask). Change both together: the page tells him what happens without a rule from this.
 HOST_OWN_TIER = {"unit-status": "do", "journal": "do", "read": "do", "art-chain-check": "ask", "deploy-loom": "ask",
                  "pieces-update": "ask", "restart": "ask"}
 # Suggested rules, shown on his page until he sets one for that verb (t-2104): reads just run, a deploy or a piece
@@ -1910,7 +1911,8 @@ def host_rules_panel():
                    "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS] + [{"value": "none", "label": "No rule"}]},
     } for r in sorted(rules, key=lambda r: (STRICT[r["tier"]], r["scope"]))]
     # What we suggest, for him to set or leave (never set for him): a verb with no rule of its own shows one tap away.
-    have = {r["scope"] for r in rules}
+    # host:V:* is every step of V, the same as host:V: either one is his rule for the verb.
+    have = {r["scope"].removesuffix(":*") for r in rules}
     rows += [{
         "label": host_scope_words(scope), "value": "No rule yet", "tone": "muted",
         "detail": f"Suggested: {TIER_WORDS[tier]}. Without a rule, " + ("it runs without asking you" if HOST_OWN_TIER[

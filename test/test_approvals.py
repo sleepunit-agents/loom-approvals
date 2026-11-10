@@ -2166,6 +2166,17 @@ class HostSteps(unittest.TestCase):
         labels = [(r["label"], r["value"]) for r in panel()["rows"]]
         self.assertEqual(labels.count(("Deploying loom: any", "Tell me after")), 1)
         self.assertNotIn(("Deploying loom: any", "No rule yet"), labels)
+        # A rule for every step of a verb, written either way, is his rule for it: no suggestion beside it.
+        self.set("restart:*", "do")
+        self.set("read:allocator-*", "ask")
+        labels = [(r["label"], r["value"]) for r in panel()["rows"]]
+        self.assertNotIn(("Restarting a service: any", "No rule yet"), labels)
+        # A narrower rule leaves the verb's own suggestion standing.
+        self.assertIn(("Reading the runtime's logs: any", "No rule yet"), labels)
+        # Tapping "No rule" on a suggestion writes nothing.
+        r = ap.ui_act({"action": "rule", "caller": OWNER, "fields": {"scope": "host:journal", "kind": "host", "tier": "none"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.rule("journal:loom-http.service"), "none\n")
         # Not his, no rule: a member's tap on a suggestion is refused like any rule.
         self.assertFalse(ap.ui_act({"action": "rule", "caller": {"kind": "owner", "who": "sam", "agents": ["ada"]},
                                     "fields": {"scope": "host:restart", "kind": "host", "tier": "do"}})["ok"])
