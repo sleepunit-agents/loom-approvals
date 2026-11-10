@@ -525,11 +525,14 @@ def may_spend(asked, who):
 
 
 def caller_house(caller):
-    """The house the piece API says a call came from (core's word, from the house's own token): None for a call from
-    no house, False for one whose house id isn't one (verify_statement then says no: never checked as if houseless)."""
-    if not isinstance(caller, dict) or caller.get("kind") != "agent" or caller.get("house") is None:
+    """The house the piece API says a call came from (core's word, from the house's own token): "-" for an agent's call
+    from no house (a houseless token: then only a statement whose body runs in no house holds), None for no caller
+    (loom's machine itself), False for a house id that isn't one (verify_statement then says no)."""
+    if not isinstance(caller, dict) or caller.get("kind") != "agent":
         return None
-    h = caller["house"]
+    h = caller.get("house")
+    if h is None:
+        return "-"
     return h if isinstance(h, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", h) else False
 
 
