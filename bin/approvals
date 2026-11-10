@@ -1682,7 +1682,7 @@ def ui_page(req):
     if pending:
         # Each waiting approval: what it would do, and why, in words; Allow once and Deny in its sheet.
         sections.append({"id": "waiting", "title": "Waiting on you", "tone": "warn", "blocks": [{"type": "panel", "rows": [{
-            "label": headline(a), "agent": a["who"]["agent"], "tone": "warn",
+            "label": headline(a), "ref": a["id"], "agent": a["who"]["agent"], "tone": "warn",
             "value": a["why"], "detail": f"{name_of(a['who']['agent'])} · {ago(a['at'])}",
             "sheet": {"title": f"{name_of(a['who']['agent'])} asks", "blocks": [
                 {"type": "text", "text": headline(a)},
@@ -1704,7 +1704,7 @@ def ui_page(req):
         sections.append(rules_section(cards))
     if past:
         sections.append({"id": "answered", "title": "Answered", "blocks": [{"type": "list", "wrap": True, "items": [{
-            "text": headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_APPLIED else f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
+            "ref": a["id"], "text": headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_APPLIED else f"{name_of(a['who']['agent'])} · {kind_of(a)}", "agent": a["who"]["agent"], "meta": past_meta(a),
             "tone": {"denied": "bad", "expired": "muted", "withdrawn": "muted"}.get(a["state"]),
         } for a in past]}]})
     if rows:

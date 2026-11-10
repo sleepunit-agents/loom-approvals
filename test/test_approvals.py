@@ -365,6 +365,7 @@ class Approvals(unittest.TestCase):
         # An old-style request: its words, marked as having no plain question; why as the value; the kind and target
         # only in the sheet's small print.
         self.assertEqual(row["label"], "(no plain question given) Push the fix to acme/app b")
+        self.assertEqual(row["ref"], aid, "the desktop can chat about the exact approval")
         self.assertEqual(row["value"], "Sam asked for it in #general")
         self.assertEqual(row["detail"], "Ada · just now")
         self.assertIn("A GitHub write: acme/app:octocat", row["sheet"]["blocks"][-1]["text"])
@@ -372,7 +373,7 @@ class Approvals(unittest.TestCase):
         self.assertEqual([(b["action"], b["label"], b["fields"]) for b in buttons], [("allow", "Allow once", {"id": aid}), ("deny", "Deny", {"id": aid})])
         # No raw id in what people read: only in the record's sheet.
         shown = json.dumps([s for s in page["sections"] if s["id"] != "record"])
-        self.assertNotIn(aid, shown.replace(json.dumps({"id": aid})[1:-1], ""))
+        self.assertNotIn(aid, shown.replace(json.dumps({"id": aid})[1:-1], "").replace(json.dumps({"ref": aid})[1:-1], ""))
         self.assertIn(aid, json.dumps([s for s in page["sections"] if s["id"] == "record"]))
 
     def test_the_page_says_how_each_answered_one_went_in_words(self):
@@ -384,6 +385,7 @@ class Approvals(unittest.TestCase):
         page = ap.ui_page({"path": ""})
         self.assertEqual(page["sections"][0]["blocks"][0]["type"], "health", "nothing waiting: a plain headline")
         answered = next(s for s in page["sections"] if s["id"] == "answered")["blocks"][0]
+        self.assertEqual({i["ref"] for i in answered["items"]}, {aid, aid2})
         self.assertTrue(answered["wrap"], "a body's words are shown whole")
         metas = {i["meta"].split(" · ")[1] for i in answered["items"]}
         self.assertEqual(metas, {"Allowed by Pat Owner, and used just now", "Denied just now"})
