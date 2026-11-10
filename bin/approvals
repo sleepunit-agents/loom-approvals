@@ -533,7 +533,7 @@ def caller_house(caller):
     h = caller.get("house")
     if h is None:
         return "-"
-    return h if isinstance(h, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", h) else False
+    return h if isinstance(h, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", h) else False
 
 
 def verify_statement(statement, house=None):

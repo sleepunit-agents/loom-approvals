@@ -1455,6 +1455,9 @@ sys.exit(int(os.environ.get("RT_EXIT", "0")))
             self.assertEqual(ap.principal_for_call({**HOUSE, "house": "h-7 --x"}, {"agent": "ada"}, "s")["for"], ap.UNKNOWN,
                              "a house id that isn't one is no, never checked as if from no house")
             self.assertEqual(len(self.calls()), n, "and never passed on")
+            self.assertEqual(ap.principal_for_call({**HOUSE, "house": "-"}, {"agent": "ada"}, "s")["for"], ap.UNKNOWN,
+                             "a house named - is never read as no house")
+            self.assertEqual(len(self.calls()), n)
             self.assertEqual(ap.proven_conversation(HOUSE, {"agent": "ada"}, "cv-0123456789ab", "s"), "cv-0123456789ab")
             self.assertEqual(self.calls()[-1]["argv"], ["--verify", "--house", "h-7"])
         # The runtime's no (its body isn't in that house) is unknown, so the rules ask.
