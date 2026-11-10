@@ -1066,7 +1066,7 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertEqual(w(c, "owner", chat)["exit"], 1)
         # A body on loom's machine never says --as, not even empty (which would skip fetching whom it acts for).
         with mock.patch.dict(os.environ, {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}):
-            for argv in (["withdraw", c, "--as", ""], ["withdraw", c, "--as="]):
+            for argv in (["withdraw", c, "--as", ""], ["withdraw", c, "--as="], ["withdraw", c, "--a", ""], ["withdraw", c, "--a="]):
                 with self.assertRaises(PermissionError):
                     ap.run(argv)
         self.assertEqual(ap.get(c)["state"], "pending")
@@ -1252,6 +1252,9 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertEqual(main("rule", "merge", self.ON_POND, env=conv, statement=f"S:{agent}:owner"), "do\n")
         # --for (the Changes piece's view) is a call here like any other: a local body isn't the owner by saying it.
         self.assertEqual(main("rule", "merge", self.ON_POND, "--for", agent, env=conv), "ask\n")
+        # Nor by an empty --as, which once skipped fetching whom it acts for and read as loom's machine's own call.
+        out = main("request", "--kind", "github-write", "--target", "x/y", "--what", "w", "--why", "y", "--as", "", env=conv)
+        self.assertEqual(ap.get(out.split(":")[0])["for"], ap.UNKNOWN)
         with mock.patch.dict(os.environ, {"APPROVALS_LOCAL_PRINCIPAL": "unknown"}):
             self.assertEqual(ap.run(["rule", "merge", self.ON_POND, "--for", "ada"])[0], "ask\n")
         self.assertEqual(ap.run(["rule", "merge", self.ON_POND, "--for", "ada"])[0], "do\n")

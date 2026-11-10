@@ -2020,7 +2020,8 @@ def run(argv, caller=None):
     u.add_argument("--on-behalf", dest="on_behalf", default="")
     w = sub.add_parser("withdraw", add_help=False, exit_on_error=False)
     w.add_argument("id")
-    w.add_argument("--as", dest="as_", default="")
+    # None when not said, so an empty --as (or an abbreviation of it) is told apart from none: see body_here below.
+    w.add_argument("--as", dest="as_", default=None)
     sub.add_parser("list", add_help=False, exit_on_error=False)
     st = sub.add_parser("standing", add_help=False, exit_on_error=False)
     for fl in ("--kind", "--target", "--check", "--digest"):
@@ -2052,7 +2053,7 @@ def run(argv, caller=None):
     # never files one in its own words, or for whom it likes.
     piece_kind = (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
     if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd == "standing"
-                      or (a.cmd == "withdraw" and any(x == "--as" or x.startswith("--as=") for x in argv))):
+                      or (a.cmd == "withdraw" and a.as_ is not None)):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's
         # environment; either one refuses). A body that unsets them is past what any piece here can check: loom's machine
@@ -2220,12 +2221,15 @@ def main():
         print(__doc__.strip())
         return
     conv = os.environ.get("LOOM_BODY_CONVERSATION", "")
-    if CONVERSATION.fullmatch(conv) and "--as" not in args:
+    if CONVERSATION.fullmatch(conv):
+        # A body here is one whatever it types: an empty --as (or an abbreviation of it) never makes it loom's machine's
+        # own call, which reads as the owner (review of t-2063). Only a piece's --as acts for a body, as before.
         global LOCAL_BODY
         LOCAL_BODY = True
-        args, _ = take_principal(args)
-        st = fetch_statement(conv)
-        args = args + (["--principal", st] if st else [])
+        if "--as" not in args:
+            args, _ = take_principal(args)
+            st = fetch_statement(conv)
+            args = args + (["--principal", st] if st else [])
     try:
         out = run(args)
         out, err = out if isinstance(out, tuple) else (out, "")
