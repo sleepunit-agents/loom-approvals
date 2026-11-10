@@ -1061,7 +1061,7 @@ def make_rule(kind, scope, tier, by):
     if kind == HOST_KIND:
         # Said with or without its host: prefix; a unit's or piece's name is matched as written.
         scope = scope if scope.startswith("host:") else f"host:{scope}"
-        if not valid_scope(scope, kind) or any(x == ".." for x in scope.split("/")):
+        if not valid_scope(scope, kind) or any(x == ".." for x in re.split(r"[/:]", scope)):
             raise ValueError("a step is a verb (restart), or a verb and what it's for (restart:loom-http.service, "
                              f"pieces-update:*): {', '.join(HOST_VERBS)}")
     else:
@@ -1191,6 +1191,7 @@ def rules_for(agent, kind, targets, principal=OWNER, people=()):
         raise ValueError(f"only {', '.join(RULE_KINDS)} has standing rules")
     with Store() as s:
         rules = list(s.rules())
+        broken = s.rules_broken
         if principal != OWNER:
             rules = [g for g in s.grants() if g["person"] == principal]
         rows = [a for a in s.d["approvals"].values() if a["kind"] == kind and a["who"].get("agent") == agent
@@ -1199,7 +1200,11 @@ def rules_for(agent, kind, targets, principal=OWNER, people=()):
     out = {}
     for t in targets:
         if kind == HOST_KIND:
-            if principal != OWNER:
+            if broken:
+                # Fails closed, as merges do: a rules file that can't be read might hold an ask for this step.
+                resolve_host([], t)
+                tier, rule, note = "ask", None, "the standing rules can't be read, so this asks"
+            elif principal != OWNER:
                 if not host_of(t):
                     resolve_host([], t)        # says what a host target is
                 tier, rule, note = "ask", None, HOST_NOT_OWNER

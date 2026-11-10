@@ -2123,7 +2123,7 @@ class HostSteps(unittest.TestCase):
         self.assertEqual(self.api(["rule", "host", "pieces-update:runtime", "--principal", "S:ada:@loren"])["stdout"], "ask\n")
 
     def test_bad_scopes_and_targets_are_refused(self):
-        for bad in ("rm -rf", "host:shell", "restart:../x", "host:read:../../etc/passwd", "unknown:x"):
+        for bad in ("rm -rf", "host:shell", "restart:../x", "host:read:../../etc/passwd", "unknown:x", "host:restart:.."):
             r = ap.ui_act({"action": "host-rule-add", "caller": OWNER, "fields": {"scope": bad, "tier": "do"}})
             self.assertFalse(r["ok"], bad)
         for bad in ("restart", "shell:ls", "read:../secrets", "restart:a b"):
@@ -2147,6 +2147,10 @@ class HostSteps(unittest.TestCase):
         r = ap.ui_act({"action": "rule", "caller": OWNER, "fields": {"scope": "host:deploy-loom", "kind": "host", "tier": "none"}})
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.rule("deploy-loom:fix"), "none\n")
+
+    def test_a_rules_file_that_can_t_be_read_asks_even_for_a_read(self):
+        (Path(self.td.name) / "rules.json").write_text("{not json")
+        self.assertEqual(self.rule("read:allocator-shadow.jsonl"), "ask\n")
 
     def test_tell_is_the_runtime_s_only_and_only_under_tell_or_do(self):
         self.set("pieces-update", "tell")
