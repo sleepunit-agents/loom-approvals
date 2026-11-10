@@ -1880,6 +1880,15 @@ HOST_VERB_WORDS = {"unit-status": "Reading a service's status", "journal": "Read
                    "deploy-loom": "Deploying loom", "pieces-update": "Updating a piece", "restart": "Restarting a service"}
 
 
+# Each verb's own tier when no rule says otherwise (loom-box src/hostverbs.mjs VERBS[verb].tier): reads run, changes ask.
+HOST_OWN_TIER = {"unit-status": "do", "journal": "do", "read": "do", "art-chain-check": "ask", "deploy-loom": "ask",
+                 "pieces-update": "ask", "restart": "ask"}
+# Suggested rules, shown on his page until he sets one for that verb (t-2104): reads just run, a deploy or a piece
+# update tells him after, a restart or Art's wake-chain check asks him.
+HOST_SUGGESTED = (("host:unit-status", "do"), ("host:journal", "do"), ("host:read", "do"), ("host:deploy-loom", "tell"),
+                  ("host:pieces-update", "tell"), ("host:restart", "ask"), ("host:art-chain-check", "ask"))
+
+
 def host_scope_words(scope):
     """A host rule's scope as people say it: "Restarting a service: loom-http", "Updating a piece: any"."""
     m = HOST_SCOPE.fullmatch(scope)
@@ -1900,6 +1909,16 @@ def host_rules_panel():
         "choice": {"action": "rule", "name": "tier", "value": r["tier"], "fields": {"scope": r["scope"], "kind": HOST_KIND},
                    "options": [{"value": t, "label": TIER_WORDS[t]} for t in TIERS] + [{"value": "none", "label": "No rule"}]},
     } for r in sorted(rules, key=lambda r: (STRICT[r["tier"]], r["scope"]))]
+    # What we suggest, for him to set or leave (never set for him): a verb with no rule of its own shows one tap away.
+    have = {r["scope"] for r in rules}
+    rows += [{
+        "label": host_scope_words(scope), "value": "No rule yet", "tone": "muted",
+        "detail": f"Suggested: {TIER_WORDS[tier]}. Without a rule, " + ("it runs without asking you" if HOST_OWN_TIER[
+            HOST_SCOPE.fullmatch(scope).group(1)] == "do" else "it asks you each time"),
+        "choice": {"action": "rule", "name": "tier", "value": "none", "fields": {"scope": scope, "kind": HOST_KIND},
+                   "options": [{"value": t, "label": TIER_WORDS[t] + (" (suggested)" if t == tier else "")} for t in TIERS]
+                   + [{"value": "none", "label": "No rule"}]},
+    } for scope, tier in HOST_SUGGESTED if scope not in have]
     rows.append({"label": "Add a rule for a step", "value": "Deploys, piece updates, restarts, reads",
                  "edit": {"action": "host-rule-add", "title": "Add a rule for a step on loom's machine", "submit": "Add the rule",
                           "note": "A step (pieces-update), or a step and what it's for (restart:loom-http, "
