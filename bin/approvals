@@ -2226,8 +2226,10 @@ def main():
         # own call, which reads as the owner (review of t-2063). Only a piece's --as acts for a body, as before.
         global LOCAL_BODY
         LOCAL_BODY = True
+        # Never a statement it typed (one slipped in after a literal "--as" given as some flag's value included): only
+        # the runtime's, fetched for its own conversation when it isn't a piece's call (--as).
+        args, _ = take_principal(args)
         if "--as" not in args:
-            args, _ = take_principal(args)
             st = fetch_statement(conv)
             args = args + (["--principal", st] if st else [])
     try:

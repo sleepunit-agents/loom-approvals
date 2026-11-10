@@ -1252,6 +1252,8 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertEqual(main("rule", "merge", self.ON_POND, env=conv, statement=f"S:{agent}:owner"), "do\n")
         # --for (the Changes piece's view) is a call here like any other: a local body isn't the owner by saying it.
         self.assertEqual(main("rule", "merge", self.ON_POND, "--for", agent, env=conv), "ask\n")
+        # Nor by a statement it types itself.
+        self.assertEqual(main("rule", "merge", self.ON_POND, "--principal", f"S:{agent}:owner", env=conv), "ask\n")
         # Nor by an empty --as, which once skipped fetching whom it acts for and read as loom's machine's own call.
         out = main("request", "--kind", "github-write", "--target", "x/y", "--what", "w", "--why", "y", "--as", "", env=conv)
         self.assertEqual(ap.get(out.split(":")[0])["for"], ap.UNKNOWN)
