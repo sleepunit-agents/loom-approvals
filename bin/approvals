@@ -1690,6 +1690,7 @@ def ui_manifest():
         "text": (headline(a) if a.get("ask") or for_words(a) or a["kind"] in OWNER_ANSWERED else f"{name_of(a['who']['agent'])} asked: {what_of(a)}")[:300],
         "outcome": OUTCOME[a["state"]] + (f" ({'Allowed' if a['state'] != 'denied' else 'Denied'} by {a['by']}.)" if a.get("by") else ""),
         "at": a.get("used") or a.get("decided") or a["at"], "kind": "permission", "agent": a["who"]["agent"], "page": "",
+        **({"conversation": a["conversation"]} if a.get("conversation") else {}),
     } for a in done], "notices": [notice_of(n) for n in notices()[:20]]}
 
 
@@ -1808,7 +1809,11 @@ def record_text(rows):
 def ui_page(req):
     if (req or {}).get("path", "") != "":
         return {"title": "Not found", "sections": []}
-    rows = recent()
+    # One asked in a conversation is answered in loom's Inbox, which shows it only to whom it's for (a Comms thread's
+    # member: loom t-2084); this page can't tell whose a conversation is, so it names how many and leaves their words out.
+    every = recent()
+    rows = [a for a in every if not a.get("conversation")]
+    elsewhere = sum(1 for a in every if a.get("conversation") and a["state"] == "pending")
     pending = [a for a in rows if a["state"] == "pending"]
     past = [a for a in rows if a["state"] != "pending"][:60]
     owner = is_owner(req)
@@ -1835,9 +1840,13 @@ def ui_page(req):
                 {"type": "text", "tone": "muted", "text": f"Exactly what this allows: {fine_print(a)}"},
             ]},
         } for a in pending[:20]]}]})
-    else:
+    elif not elsewhere:
         sections.append({"id": "waiting", "blocks": [{"type": "health", "tone": "ok", "text": "Nothing waiting on you",
                                                       "detail": "When a body asks for an approval, it shows here and on Home."}]})
+    if elsewhere:
+        sections.append({"id": "conversations", "blocks": [{"type": "health", "tone": "warn",
+            "text": f"{elsewhere} asked in {'a conversation' if elsewhere == 1 else 'conversations'}",
+            "detail": "Each is in the Inbox of the person it was asked of, with its Allow and Deny."}]})
     if owner:
         sections.append(rules_section(cards))
     if past:
@@ -2132,7 +2141,10 @@ def states(ids):
         rows = s.d["approvals"]
         # An owner-applied one's target too: an identifier (<piece>:<agent>, <agent>:<w-ids>, <agent>:<cv>), which core
         # hands the piece that spends and applies it.
+        # And where it was asked (or null): one asked in a member's Comms thread is that member's to answer, which
+        # loom decides from this when the card isn't one it lists (loom t-2084). A loom without it refuses the answer.
         return {i: {"state": state_of(rows[i]), "agent": rows[i]["who"].get("agent"), "kind": rows[i]["kind"],
+                    "conversation": rows[i].get("conversation"),
                     **({"target": rows[i]["target"]} if rows[i]["kind"] in OWNER_APPLIED else {})}
                 for i in ids if i in rows}
 
