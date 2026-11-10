@@ -234,8 +234,8 @@ class Approvals(unittest.TestCase):
         r = state([aid, other, "a-00000000"])
         self.assertEqual(r["status"], 200)
         # Known ids only: one it has no record of is left out (core reads that as gone).
-        self.assertEqual(r["body"]["approvals"], {aid: {"state": "pending", "agent": "ada", "kind": "github-write"},
-                                                  other: {"state": "pending", "agent": "ada", "kind": "github-write"}})
+        self.assertEqual(r["body"]["approvals"], {aid: {"state": "pending", "agent": "ada", "kind": "github-write", "conversation": None},
+                                                  other: {"state": "pending", "agent": "ada", "kind": "github-write", "conversation": None}})
         ap.answer(aid, "allow")
         self.assertEqual(state([aid])["body"]["approvals"][aid]["state"], "allowed")
         self.assertEqual(self.api(["use", aid, "--kind", "github-write", "--target", "acme/app:octocat"])["body"]["exit"], 0)
@@ -540,6 +540,20 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(ap.recent()), 1)
         self.assertEqual(self.api(["rule", "merge", T])["stdout"], f"ask denied {aid}\n")
 
+    def test_grant_never_answers_one_asked_in_a_conversation(self):
+        # loom t-2084: a card asked in a member's Comms thread is theirs to answer; another owner's Yes on Changes is its own record.
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green", "--conversation", "cv-0123456789ab"])
+        aid = r["stdout"].split(":")[0]
+        out = ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jonathan-barket"])
+        self.assertNotIn(aid, out)
+        self.assertEqual({a["id"]: a["state"] for a in ap.recent()}[aid], "pending")
+        self.assertEqual(len(ap.recent()), 2)
+        # Nor does a Not yet answer it; it stops the earlier yes all the same.
+        out = ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jonathan-barket", "--deny"])
+        states = {a["id"]: a["state"] for a in ap.recent()}
+        self.assertEqual(states[aid], "pending")
+        self.assertNotIn("allowed", states.values())
+
     def test_grant_is_refused_over_the_api_and_for_anything_but_a_merge_target(self):
         self.assertEqual(self.api(["grant", "--kind", "merge", "--target", T, "--for", "ada"])["exit"], 1)
         with self.assertRaises(ValueError):
@@ -772,6 +786,25 @@ class PlainAsks(unittest.TestCase):
         plain = self.ask(*self.GOOD, target="acme/app:third")
         self.assertEqual(plain["exit"], 0, plain)
         self.assertNotIn("conversation", [a for a in ap.ui_manifest()["asks"] if "third" in a["fine"]][0])
+
+    def test_one_asked_in_a_conversation_is_its_inbox_s_alone_loom_reads_where_it_was_asked(self):
+        # loom t-2084: a Comms thread's asks are its member's. This page can't tell whose a conversation is, so it never
+        # shows one asked in one (loom's Inbox does, to whom it's for); state says where it was asked, for loom's check;
+        # and its history says so too, so loom keeps that from other members.
+        r = self.ask(*self.GOOD, "--conversation", "cv-0123456789ab")
+        aid = r["stdout"].split(":")[0]
+        plain = self.ask(*self.GOOD, target="acme/app:third")
+        pid = plain["stdout"].split(":")[0]
+        page = json.dumps(ap.ui_page({"path": "", "caller": OWNER}))
+        self.assertNotIn(aid, page)
+        self.assertIn(pid, page)
+        self.assertNotIn("asked in a conversation\"", page)
+        st = ap.api_answer({"caller": {"kind": "owner", "agents": "*"}, "path": "state", "body": {"ids": [aid, pid]}})["body"]["approvals"]
+        self.assertEqual((st[aid]["conversation"], st[pid]["conversation"]), ("cv-0123456789ab", None))
+        ap.answer(aid, "deny")
+        ap.answer(pid, "deny")
+        self.assertEqual(sorted((a.get("conversation") or "") for a in ap.ui_manifest()["answered"]), ["", "cv-0123456789ab"])
+        self.assertNotIn(aid, json.dumps(ap.ui_page({"path": "", "caller": OWNER})))
 
     def test_a_continuation_repairs_missing_pending_provenance_without_duplicate_or_retarget(self):
         first = self.ask(*self.GOOD)
@@ -1570,10 +1603,20 @@ class Grants(unittest.TestCase):
         ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})
         self.assertEqual(ap.run(["use", aid, "--kind", "grant", "--target", "tasks:mark", "--as", json.dumps({"kind": "agent", "agent": "ada"})]), f"{aid}: used\n")
 
+    def test_one_only_he_answers_stays_on_his_page_wherever_it_was_asked(self):
+        # loom t-2084: conversation-asked approvals are left to loom's Inbox, except those only the household owner answers.
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned([
+            "request", "--kind", "grant", "--target", "tasks:mark", "--ask", "Give Mark access to Tasks?", "--why", "He asked.",
+            "--if-yes", "He can.", "--if-no", "He can't.", "--conversation", "cv-0123456789ab"])}})
+        self.assertEqual(r["body"]["exit"], 0, r)
+        aid = r["body"]["stdout"].split(":")[0]
+        self.assertIn(aid, json.dumps(ap.ui_page({"path": "", "caller": OWNER})))
+        self.assertNotIn(aid, json.dumps(ap.ui_page({"path": "", "caller": {"kind": "owner", "agents": ["ada"]}})))
+
     def test_state_carries_a_grant_s_target_for_core(self):
         aid = self.ask()
         r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})
-        self.assertEqual(r["body"]["approvals"][aid], {"state": "pending", "agent": "ada", "kind": "grant", "target": "tasks:mark"})
+        self.assertEqual(r["body"]["approvals"][aid], {"state": "pending", "agent": "ada", "kind": "grant", "conversation": None, "target": "tasks:mark"})
 
 
 class OwnerApplied(unittest.TestCase):
@@ -1706,7 +1749,7 @@ class OwnerApplied(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertTrue(ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})["ok"])
         r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})
-        self.assertEqual(r["body"]["approvals"][aid], {"state": "allowed", "agent": "art", "kind": "box-write-off", "target": f"art:{box}@1762718400"})
+        self.assertEqual(r["body"]["approvals"][aid], {"state": "allowed", "agent": "art", "kind": "box-write-off", "conversation": None, "target": f"art:{box}@1762718400"})
         with self.assertRaises(PermissionError):
             ap.run(["use", aid, "--kind", "box-write-off", "--target", f"art:{box}@1762718400"])   # never without --as
         self.assertEqual(ap.run(["use", aid, "--kind", "box-write-off", "--target", f"art:{box}@1762718400", "--as", self.AS, "--on-behalf", "owner"]), f"{aid}: used\n")
@@ -1714,7 +1757,7 @@ class OwnerApplied(unittest.TestCase):
     def test_state_carries_the_target_for_core(self):
         aid = self.file()
         r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})
-        self.assertEqual(r["body"]["approvals"][aid], {"state": "pending", "agent": "art", "kind": "vouch-wake",
+        self.assertEqual(r["body"]["approvals"][aid], {"state": "pending", "agent": "art", "kind": "vouch-wake", "conversation": None,
                                                         "target": "art:w-0f0cfb,w-3c68fa,w-55e1c0"})
 
     def test_the_piece_withdraws_its_own_pending_card_only(self):
