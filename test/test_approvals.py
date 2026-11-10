@@ -992,7 +992,7 @@ class OnWhoseBehalf(unittest.TestCase):
         several = self.ask_merge("loren,dan", f"github:onterris/on-pond#221@{SHA}")
         self.assertEqual(ap.headline(ap.get(several)), "Merge on-pond#221 for Loren and Dan?")
         # The owner's own: the body's ask, as before.
-        self.assertEqual(ap.headline(ap.get(self.ask_merge("owner", f"github:onterris/on-pond#222@{SHA}"))), "OK to merge the alarm fix for the pond page?")
+        self.assertEqual(ap.headline(ap.get(self.ask_merge("owner", f"github:acme/on-pond#222@{SHA}"))), "OK to merge the alarm fix for the pond page?")
         # The record says it too.
         rec = next(x for x in ap.ui_page({"path": "", "caller": OWNER})["sections"] if x["id"] == "record")
         self.assertIn(f"{aid}  pending  merge", rec["blocks"][0]["rows"][0]["sheet"]["blocks"][0]["text"])
@@ -1001,7 +1001,7 @@ class OnWhoseBehalf(unittest.TestCase):
     def test_asked_for_one_person_it_is_spent_only_for_them(self):
         aid = self.ask_merge("loren")
         self.assertEqual(self.ask_merge("loren"), aid, "asking again for the same person is the same card")
-        mine = self.ask_merge("owner")
+        mine = self.ask_merge("owner", f"github:acme/on-pond#220@{SHA}")
         self.assertNotEqual(mine, aid, "for the owner it's another card")
         ap.ui_act({"action": "allow", "fields": {"id": aid}})
         use = lambda whose: self.api(["use", aid, "--kind", "merge", "--target", self.ON_POND], whose)
@@ -1014,6 +1014,58 @@ class OnWhoseBehalf(unittest.TestCase):
         self.assertEqual(use("loren")["exit"], 1, "once")
         # check --json says whom it's for, so a continuation spends it as that.
         self.assertEqual(json.loads(self.api(["check", aid, "--json"], "loren")["stdout"])["for"], "loren")
+
+    def test_a_merge_the_rules_answer_files_no_card(self):
+        # t-2063: the owner's own work under `do` (or `tell`) merges; a card for it is refused, nothing filed.
+        r = self.api(["request", "--kind", "merge", "--target", self.ON_POND, "--ask", "OK to merge the alarm fix?",
+                      "--why", "Green.", "--if-yes", "I merge it.", "--if-no", "It waits."], "owner")
+        self.assertEqual(r["exit"], 1, r)
+        self.assertIn("the standing rule for this merge is do", r["stderr"])
+        self.assertEqual([a for a in ap.ui_manifest()["asks"]], [], "nothing on his Inbox")
+        with ap.Store() as s:
+            s.replace_rules([ap.make_rule("merge", "github:onterris/*", "tell", "test")])
+        r = self.api(["request", "--kind", "merge", "--target", self.ON_POND, "--ask", "OK to merge the alarm fix?",
+                      "--why", "Green.", "--if-yes", "I merge it.", "--if-no", "It waits."], "owner")
+        self.assertIn("is tell", r["stderr"])
+        self.assertIn("approvals tell", r["stderr"])
+        # Someone loom can't name, a person with no grant, and no rule at all: asked, as before.
+        for whose, target in (("?", self.ON_POND), (None, self.ON_POND), ("loren", self.ON_POND), ("owner", f"github:else/app#1@{SHA}")):
+            self.assertTrue(self.ask_merge(whose, target).startswith("a-"), whose)
+        # A person's own grant of do answers for them too.
+        self.assertTrue(self.grant("dan", "github:onterris/*", "do")["ok"])
+        r = self.api(["request", "--kind", "merge", "--target", self.ON_POND, "--ask", "OK to merge the alarm fix?",
+                      "--why", "Green.", "--if-yes", "I merge it.", "--if-no", "It waits."], "dan")
+        self.assertIn("is do", r["stderr"])
+
+    def test_a_body_takes_back_its_own_agent_s_pending_card(self):
+        other = f"github:else/app#1@{SHA}"
+        unknown = self.ask_merge("?", self.ON_POND)
+        mine = self.ask_merge("owner", other)
+        lorens = self.ask_merge("loren", self.ON_POND)
+        w = lambda aid, whose, caller=HOUSE: self.api(["withdraw", aid], whose, caller)
+        # Another agent's body: refused, in words that say nothing of the card.
+        r = w(mine, "owner", {"kind": "agent", "agent": "bo", "house": "h-9"})
+        self.assertEqual((r["exit"], r["stderr"]), (1, f"approvals: {mine} isn't one this body may take back\n"))
+        # Someone loom can't name takes back neither the owner's card nor Loren's.
+        self.assertEqual(w(mine, "?")["exit"], 1)
+        self.assertEqual(w(lorens, None)["exit"], 1)
+        # The owner's own work takes back its card and one asked for someone loom can't name, never Loren's.
+        self.assertIn("was asked for Loren", w(lorens, "owner")["stderr"])
+        self.assertEqual(w(unknown, "owner")["stdout"], f"{unknown}: withdrawn\n")
+        self.assertEqual(w(mine, "owner")["stdout"], f"{mine}: withdrawn\n")
+        self.assertEqual(w(lorens, "loren")["stdout"], f"{lorens}: withdrawn\n")
+        self.assertEqual({ap.get(a)["state"] for a in (unknown, mine, lorens)}, {"withdrawn"})
+        self.assertEqual([a for a in ap.ui_manifest()["asks"]], [], "off his Inbox")
+        # An answer stands.
+        again = self.ask_merge("owner", f"github:else/app#2@{SHA}")
+        ap.ui_act({"action": "allow", "fields": {"id": again}})
+        self.assertIn("allowed: an answer stands", w(again, "owner")["stderr"])
+        # A chat house takes back only what its own service asked.
+        chat = {"kind": "agent", "agent": "ada", "house": "h-8", "service": "discord-bodies"}
+        c = self.ask_merge("owner", f"github:else/app#3@{SHA}")
+        self.assertEqual(w(c, "owner", chat)["exit"], 1)
+        # Not a piece's card (a vouch-wake, the clock's), from a body: the old test covers it; --as stays the piece's.
+        self.assertEqual(self.api(["withdraw", c, "--as", json.dumps(HOUSE)], "owner")["exit"], 1)
 
     def test_the_owner_s_yes_for_himself_is_not_a_yes_for_someone_else(self):
         mine = self.ask_merge("owner", f"github:acme/app#5@{SHA}")

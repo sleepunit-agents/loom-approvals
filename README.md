@@ -12,6 +12,7 @@ The body then spends the approval on exactly the action it named, once.
 approvals request --kind KIND --target TARGET --ask "…" --why "…" --if-yes "…" --if-no "…" [--details "…"] [--minutes N]
 approvals check ID          pending | allowed | denied | used | expired | withdrawn
 approvals use ID --kind KIND --target TARGET
+approvals withdraw ID       take back a card your agent asked, while it's still pending
 approvals list              the recent ones (the owner's view, on loom's machine)
 ```
 
@@ -54,6 +55,15 @@ approvals list              the recent ones (the owner's view, on loom's machine
   gets only the state, from plain `check`. A wake approval (`local-wake`) is
   spent only by the piece that runs it on loom's machine (the clock), never by
   a body's own `use`, which would use up the yes and run nothing.
+
+- **`withdraw ID`** (t-2063): a body takes back a pending card its own agent
+  asked, unanswered, when it's moot (the change merged another way, a push
+  made its head stale, the standing rules now answer it), so it leaves the
+  owner's Inbox. Only a card it could spend (the same agent; a chat or bridge
+  house only its own service's), only one asked for its own principal (the
+  owner's own work also takes back one asked for someone loom can't name,
+  never a person's), never a kind a piece files, and never once answered. It
+  shows under Answered as "Withdrawn unanswered".
 
 Nothing here grants by itself: a body may be steered, so only the owner's
 Allow on the page makes an approval spendable.
@@ -215,6 +225,12 @@ approvals grant --kind merge --target <same> --for AGENT --by MEMBER [--person S
   or loom's machine. It's refused over the API, so a body can't grant itself.
 - **The seed.** `APPROVALS_SEED_RULES` (JSON) is written as the first rules
   when `rules.json` doesn't exist yet, and never again.
+- **A card the rules answer isn't filed** (t-2063): `request --kind merge`
+  reads the rule for the same caller and principal first, and a `do` or
+  `tell` is refused ("the standing rule for this merge is do: merge it…"),
+  with nothing on the owner's Inbox. Only `ask` files a card. A body acting
+  for someone loom can't name still asks: the owner's rules are his own
+  work's.
 - A rule never grants a write a guard would refuse: it only says whether to
   ask the owner.
 

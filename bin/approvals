@@ -612,6 +612,15 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         raise ValueError("--digest is the clock's: a local wake's whole sha256, of which its target is the first 16 hex")
     if kind == "merge" and not repo_of(target):
         raise ValueError("a merge target is literal: <forge>:<owner>/<repo>#<n>@<40-hex head>, letters, digits, . _ - only")
+    if kind == "merge":
+        # A card the standing rules already answer is one the owner never needed (t-2063: bodies filed merge cards for
+        # repos whose rule is `do`). The rule read for this same caller and principal, as `rule merge` answers it: do
+        # or tell is refused, nothing filed. Refusing a card widens nothing: ask (unknown, no rule, a project list that
+        # can't be read) files it as before.
+        tier = rules_for(who["agent"], kind, [target], p["for"], p.get("people") or ())[target]["tier"]
+        if tier in ("do", "tell"):
+            raise PermissionError(f"the standing rule for this merge is {tier}: merge it at this exact head"
+                                  + (", then approvals tell" if tier == "tell" else "") + "; no card was filed")
     if kind == GRANT_KIND and not grant_of(target):
         raise ValueError("a grant target is <piece>:<agent>, or <piece>:<agent>:<path>,<path> for only those paths "
                          "(a path, or a prefix ending in /*): tasks:mark")
@@ -793,17 +802,30 @@ def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=N
         return a
 
 
-def withdraw(caller, aid):
-    """A piece's own pending card taken back, unanswered (t-1975): the clock refreshing its one card of unknown wakes
-    with an up-to-date list, so the owner never has two for one batch. Only a kind a piece files (PIECE_KINDS), only
-    from loom's machine for the agent it was filed for (--as), and only while pending: an answer stands."""
+# Kinds a body never takes back: the ones a piece files (and withdraws, --as) for it.
+PIECE_WITHDRAWN = PIECE_KINDS | set(PIECE_OWNER_KINDS) | {"local-wake"}   # STANDING_KIND, defined below
+
+
+def withdraw(caller, aid, acting_for=True, statement=None):
+    """A pending card taken back, unanswered. acting_for (--as, loom's machine): the filing piece's own card (t-1975),
+    the clock refreshing its one card of unknown wakes with an up-to-date list, so the owner never has two for one
+    batch. Otherwise a body's (t-2063): a card its own agent asked (a merge the rules now answer, an ask that's moot),
+    never a kind a piece files, only one it could spend (may_spend), and only for its own principal; the owner's own
+    work also takes back one asked for someone loom can't name, never a person's. Only while pending: an answer stands."""
     who = who_of(caller)
+    p = None if acting_for else principal_for_call(caller, who, statement)
     with Store() as s:
         a = s.d["approvals"].get(aid)
         if not a:
             raise LookupError(f"no approval {aid}")
-        if a["kind"] not in PIECE_KINDS or a["who"].get("agent") != who["agent"]:
-            raise PermissionError(f"{aid} isn't one {who['agent']}'s piece filed")
+        if acting_for:
+            if a["kind"] not in PIECE_KINDS or a["who"].get("agent") != who["agent"]:
+                raise PermissionError(f"{aid} isn't one {who['agent']}'s piece filed")
+        elif a["kind"] in PIECE_WITHDRAWN or not may_spend(a["who"], who):
+            # Said the same whatever it is, so a refusal tells another agent nothing of what the card is for.
+            raise PermissionError(f"{aid} isn't one this body may take back")
+        elif not (same_principal(a, p) or (p["for"] == OWNER and for_of(a) == UNKNOWN)):
+            raise PermissionError(f"{aid} was asked for {for_words(a) or 'the owner'}: only a body acting for them takes it back")
         if state_of(a) != "pending":
             raise PermissionError(f"{aid} is {state_of(a)}: an answer stands")
         a["state"], a["withdrawn"] = "withdrawn", iso(now())
@@ -2029,7 +2051,8 @@ def run(argv, caller=None):
     # A local wake's card is the clock's too (t-2013): Allow every time makes it standing, so a body on loom's machine
     # never files one in its own words, or for whom it likes.
     piece_kind = (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
-    if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd in ("withdraw", "standing")):
+    if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd == "standing"
+                      or (a.cmd == "withdraw" and a.as_)):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's
         # environment; either one refuses). A body that unsets them is past what any piece here can check: loom's machine
@@ -2043,10 +2066,8 @@ def run(argv, caller=None):
     if a.cmd == "use" and a.kind in PIECE_OWNER_KINDS and not a.as_ and not caller:
         # Spent by the piece that applies it, for the agent it was filed for: always said (--as and --on-behalf).
         raise PermissionError(f"a {a.kind} approval is spent by the piece that applies it (--as the agent, --on-behalf owner)")
-    if a.cmd == "withdraw":
-        # A piece on loom's machine only, for the body it filed for: never a body over the API.
-        if caller or not a.as_:
-            raise PermissionError("withdraw is for the piece on loom's machine that filed it (--as)")
+    # withdraw with --as is the filing piece's, on loom's machine only (the --as check below refuses it over the API);
+    # without, a body takes back its own agent's card (withdraw: never a kind a piece files).
     if a.cmd == "standing":
         # The clock on loom's machine only, for the body it sets the wake for (t-2013): never a body over the API, and
         # never without saying on whose behalf (a match is for one principal).
@@ -2079,7 +2100,7 @@ def run(argv, caller=None):
             return f"{x['id']}: already allowed (until {x['expires']}); use it: approvals use {x['id']} --kind {x['kind']} --target '{x['target']}'\n"
         return f"{x['id']}: asked the owner (a card on loom's Home); check it: approvals check {x['id']}\n"
     if a.cmd == "withdraw":
-        return f"{withdraw(caller, a.id)['id']}: withdrawn\n"
+        return f"{withdraw(caller, a.id, acting_for=bool(a.as_), statement=statement)['id']}: withdrawn\n"
     if a.cmd == "standing":
         if a.check:
             return standing_state(caller, a.check) + "\n"
