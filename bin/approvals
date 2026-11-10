@@ -1471,8 +1471,11 @@ def grant(kind, target, agent, by, deny=False, person=OWNER):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", agent or ""):
         raise ValueError("--for is the agent whose change it is")
     with Store() as s:
+        # Never one asked in a conversation: that's whom it was asked of to answer, in loom's Inbox (loom t-2084); this
+        # answer is then its own record (a Not yet still stops it, as any deny stops every earlier yes: deny_siblings).
         pending = sorted((a for a in s.d["approvals"].values() if a["kind"] == kind and a["target"] == target
-                          and a["who"].get("agent") == agent and for_of(a) == person and state_of(a) == "pending"),
+                          and a["who"].get("agent") == agent and for_of(a) == person and state_of(a) == "pending"
+                          and not a.get("conversation")),
                          key=lambda a: a["at"])
     if pending:
         return answer(pending[-1]["id"], "deny" if deny else "allow", by, minutes=GRANT_MIN)
@@ -1816,7 +1819,6 @@ def ui_page(req):
     every = recent()
     shown = lambda a: not a.get("conversation") or (owner and a["kind"] in OWNER_ANSWERED)
     rows = [a for a in every if shown(a)]
-    elsewhere = sum(1 for a in every if not shown(a) and a["state"] == "pending")
     pending = [a for a in rows if a["state"] == "pending"]
     past = [a for a in rows if a["state"] != "pending"][:60]
     if owner:
@@ -1842,13 +1844,11 @@ def ui_page(req):
                 {"type": "text", "tone": "muted", "text": f"Exactly what this allows: {fine_print(a)}"},
             ]},
         } for a in pending[:20]]}]})
-    elif not elsewhere:
-        sections.append({"id": "waiting", "blocks": [{"type": "health", "tone": "ok", "text": "Nothing waiting on you",
-                                                      "detail": "When a body asks for an approval, it shows here and on Home."}]})
-    if elsewhere:
-        sections.append({"id": "conversations", "blocks": [{"type": "health", "tone": "warn",
-            "text": f"{elsewhere} asked in {'a conversation' if elsewhere == 1 else 'conversations'}",
-            "detail": "Each is in the Inbox of the person it was asked of, with its Allow and Deny."}]})
+    else:
+        # No count of the rest: how many someone else was asked privately isn't this page's to say.
+        sections.append({"id": "waiting", "blocks": [{"type": "health", "tone": "ok", "text": "Nothing waiting on you here",
+                                                      "detail": "When a body asks for an approval, it shows here and on Home; "
+                                                                "one asked in a conversation is answered from the Inbox."}]})
     if owner:
         sections.append(rules_section(cards))
     if past:

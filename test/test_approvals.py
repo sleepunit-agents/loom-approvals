@@ -540,6 +540,15 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(ap.recent()), 1)
         self.assertEqual(self.api(["rule", "merge", T])["stdout"], f"ask denied {aid}\n")
 
+    def test_grant_never_answers_one_asked_in_a_conversation(self):
+        # loom t-2084: a card asked in a member's Comms thread is theirs to answer; another owner's Yes on Changes is its own record.
+        r = self.api(["request", "--kind", "merge", "--target", T, "--what", "merge it", "--why", "green", "--conversation", "cv-0123456789ab"])
+        aid = r["stdout"].split(":")[0]
+        out = ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jonathan-barket"])
+        self.assertNotIn(aid, out)
+        self.assertEqual({a["id"]: a["state"] for a in ap.recent()}[aid], "pending")
+        self.assertEqual(len(ap.recent()), 2)
+
     def test_grant_is_refused_over_the_api_and_for_anything_but_a_merge_target(self):
         self.assertEqual(self.api(["grant", "--kind", "merge", "--target", T, "--for", "ada"])["exit"], 1)
         with self.assertRaises(ValueError):
@@ -784,7 +793,7 @@ class PlainAsks(unittest.TestCase):
         page = json.dumps(ap.ui_page({"path": "", "caller": OWNER}))
         self.assertNotIn(aid, page)
         self.assertIn(pid, page)
-        self.assertIn("1 asked in a conversation", page)
+        self.assertNotIn("asked in a conversation\"", page)
         st = ap.api_answer({"caller": {"kind": "owner", "agents": "*"}, "path": "state", "body": {"ids": [aid, pid]}})["body"]["approvals"]
         self.assertEqual((st[aid]["conversation"], st[pid]["conversation"]), ("cv-0123456789ab", None))
         ap.answer(aid, "deny")
