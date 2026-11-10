@@ -109,9 +109,12 @@ for that person, or it asks.
 - **The clock** files and spends a wake approval for a body with `--as` and
   `--on-behalf <whom the wake is for>`; only a local `--as` call may say that,
   and it's held to it. **The runtime's relay** spends a relay approval with
-  `--as` and no `--on-behalf` (it has no conversation to ask about): then
-  everything is checked but whom it was for. That's for a relay only: any other
-  kind a piece files or spends without `--on-behalf` is someone loom can't name.
+  `--as` and `--on-behalf`: whom the conversation the caller proved acts for,
+  else `-` (someone loom can't name), and it's held to it like the clock. A
+  relay spent with `--as` and no `--on-behalf` is refused (t-2052). Only a
+  grant the runtime applies leaves whom unsaid (the owner's decision about an
+  agent): any other kind a piece files or spends without `--on-behalf` is
+  someone loom can't name.
   In a house, the bin itself (rarely run there: `piece-call` is) fetches its
   statement with the house's `loom-runtime`, and keeps a supplied one if that
   fails. A relay carries none of the
