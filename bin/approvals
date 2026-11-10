@@ -150,7 +150,7 @@ def iso(t):
 
 # Kinds only a piece on loom's machine files, for the body it acts for (--as): never a body over the API, so a body
 # can't put its own words on a card the owner reads as the piece's.
-PIECE_KINDS = {"local-wake", "vouch-wake", "principal-reset"}
+PIECE_KINDS = {"local-wake", "vouch-wake", "principal-reset", "box-write-off"}
 
 # Access to one of loom's pieces for an agent (loom docs/specs/agent-runtime.md, "6. Permissions"; t-1970): a body asks
 # with --kind grant --target <piece>:<agent>[:<path>,<path>], and the household owner's Allow is applied by the runtime
@@ -168,14 +168,20 @@ GRANT_NAME = r"[a-z][a-z0-9-]{0,39}"
 #                    it worked for, are the owner's work, and fire as his. The ids sorted, each once: one set, one text.
 #   principal-reset  <agent>:<cv-id>  (the runtime): this conversation is the owner's from now on (`loom runtime
 #                    principal --reset`): what it heard before is set aside, and its session dropped.
+#   box-write-off    <agent>:<box id>  (the runtime, t-2057): that box has gone silent with the agent's conversations
+#                    in its houses; they're written off and carried on on the next box it may use.
 VOUCH_KIND = "vouch-wake"
 RESET_KIND = "principal-reset"
+WRITEOFF_KIND = "box-write-off"
 # At most 12 wakes on one card: each listed with its id, when it fires and what it's for, all within DETAILS_MAX (1000)
 # and a read the owner takes in at a glance. A clock with more files the first 12 and the rest once that's answered.
 VOUCH_MAX = 12
 VOUCH_TARGET = re.compile(rf"({GRANT_NAME}):(w-[0-9a-f]{{6}}(?:,w-[0-9a-f]{{6}}){{0,{VOUCH_MAX - 1}}})")
 RESET_TARGET = re.compile(rf"({GRANT_NAME}):(cv-[0-9a-f]{{12}})")
-OWNER_APPLIED = {GRANT_KIND, VOUCH_KIND, RESET_KIND}
+WRITEOFF_TARGET = re.compile(rf"({GRANT_NAME}):([A-Za-z0-9][A-Za-z0-9._-]{{0,63}})")
+OWNER_APPLIED = {GRANT_KIND, VOUCH_KIND, RESET_KIND, WRITEOFF_KIND}
+# Filed and spent by a piece for the agent it names, on the owner's behalf, with --details saying what it covers.
+PIECE_OWNER_KINDS = (VOUCH_KIND, RESET_KIND, WRITEOFF_KIND)
 PIECE_SPENT = set(OWNER_APPLIED)
 
 
@@ -187,6 +193,18 @@ def vouch_of(target):
         return None
     ids = m.group(2).split(",")
     return {"agent": m.group(1), "ids": ids} if ids == sorted(set(ids)) else None
+
+
+def writeoff_of(target):
+    """A box-write-off target as {agent, box}, or None: art:7f9310-0a1b2c-3d4e5f-6a7b8c."""
+    m = WRITEOFF_TARGET.fullmatch(str(target or ""))
+    return {"agent": m.group(1), "box": m.group(2)} if m else None
+
+
+def piece_target_agent(kind, target):
+    """The agent a piece-filed owner card names, or None when its target isn't well formed."""
+    x = vouch_of(target) if kind == VOUCH_KIND else reset_of(target) if kind == RESET_KIND else writeoff_of(target) if kind == WRITEOFF_KIND else None
+    return x["agent"] if x else None
 
 
 def reset_of(target):
@@ -225,6 +243,11 @@ def owner_lines(a):
         return {"if_yes": f"{name_of(r['agent'])}'s work there counts as yours from now on, with your standing permissions. "
                           "It starts afresh: what it heard before is set aside.",
                 "if_no": "Nothing changes: it stays no one's, and asks you for anything that needs you."}
+    if k == WRITEOFF_KIND and writeoff_of(t):
+        w = writeoff_of(t)
+        return {"if_yes": f"{name_of(w['agent'])}'s work there goes on, on the next box it may use, told to check what it already did. "
+                          "If that box comes back, its copies are stopped there.",
+                "if_no": "Nothing changes: it waits for that box to come back."}
     return {}
 GRANT_PATH = r"(?:\*|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*(?:/\*)?)"
 GRANT_TARGET = re.compile(rf"({GRANT_NAME}):({GRANT_NAME})(?::({GRANT_PATH}(?:,{GRANT_PATH}){{0,9}}))?")
@@ -564,13 +587,15 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         raise ValueError(f"a vouch-wake target is <agent>:<w-id>[,<w-id>…], 1 to {VOUCH_MAX} wake ids, sorted, each once")
     if kind == RESET_KIND and not reset_of(target):
         raise ValueError("a principal-reset target is <agent>:<cv-id>")
-    if kind in (VOUCH_KIND, RESET_KIND) and (vouch_of(target) or reset_of(target))["agent"] != who["agent"]:
+    if kind == WRITEOFF_KIND and not writeoff_of(target):
+        raise ValueError("a box-write-off target is <agent>:<box id>")
+    if kind in PIECE_OWNER_KINDS and piece_target_agent(kind, target) != who["agent"]:
         # Filed for the agent whose wakes or conversation it names: its owner reads whose they are from the card.
         raise PermissionError(f"a {kind} approval names the agent it's filed for ({who['agent']})")
-    if kind in (VOUCH_KIND, RESET_KIND) and p["for"] != OWNER:
+    if kind in PIECE_OWNER_KINDS and p["for"] != OWNER:
         # The owner's own decision about whose work this is: filed (and spent) on his behalf, so the card's words are true.
         raise ValueError(f"a {kind} approval is filed --on-behalf owner")
-    if kind in (VOUCH_KIND, RESET_KIND):
+    if kind in PIECE_OWNER_KINDS:
         # The owner reads exactly what his Allow does: each wake (its note and when it fires) or the conversation (its
         # label), resolved by the piece that files it. A card without them, or one that leaves a wake out, is refused.
         d = str(details or "")
@@ -581,6 +606,8 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
             raise ValueError("a vouch-wake card's --details lists every wake on it: a line each, with its id and when it fires")
         if kind == RESET_KIND and reset_of(target)["conversation"] not in d:
             raise ValueError("a principal-reset card's --details names the conversation: its label and its id")
+        if kind == WRITEOFF_KIND and writeoff_of(target)["box"] not in d:
+            raise ValueError("a box-write-off card's --details names the box: its id and when it was last heard")
     # Shown whole or not at all: words that don't fit on the card (after normalizing, as shown)
     # are refused, never cut, so nothing can hide past the part the owner reads.
     for label, text, n in (("--target", target, TARGET_MAX), ("--what", what, WORDS_MAX), ("--why", why, WORDS_MAX)):
@@ -1192,7 +1219,7 @@ STATE_WORDS = {"pending": "Waiting on you", "allowed": "Allowed", "used": "Used"
 # The kinds the clock piece files, plus any the instance names (APPROVALS_KINDS).
 KIND_WORDS = {"local-wake": "A wake on loom's machine", "relay": "A message to another agent", "merge": "A merge",
               "grant": "Access to a piece", "vouch-wake": "Scheduled jobs counted as yours",
-              "principal-reset": "A conversation counted as yours"}
+              "principal-reset": "A conversation counted as yours", "box-write-off": "Work moved off a silent box"}
 try:
     _extra = json.loads(setting("APPROVALS_KINDS", "{}"))
     KIND_WORDS.update({k: v for k, v in _extra.items() if KIND.match(str(k)) and isinstance(v, str)} if isinstance(_extra, dict) else {})
@@ -1296,6 +1323,10 @@ def fine_print(a):
         r = reset_of(a["target"])
         return (f"A conversation counted as yours, {from_of(a)}. Allowing it makes {r['conversation']} your work from "
                 "now on: the runtime applies it at once, as you, setting aside what it heard before and its session.")[:FINE_MAX]
+    if a.get("kind") == WRITEOFF_KIND and writeoff_of(a.get("target")):
+        w = writeoff_of(a["target"])
+        return (f"Work moved off a silent box, {from_of(a)}. Allowing it writes off {name_of(w['agent'])}'s houses on box "
+                f"{w['box']}: the runtime applies it at once, as you, and their conversations go on elsewhere.")[:FINE_MAX]
     fw = for_words(a)
     named = a.get("people") or []
     everyone = f" ({', '.join(person_name(p) for p in named)})" if len(named) > 3 else ""
@@ -1737,7 +1768,7 @@ def run(argv, caller=None):
     if getattr(a, "on_behalf", "") and not a.as_:
         raise PermissionError("--on-behalf is for a piece on loom's machine acting for a body (--as)")
     body_here = bool(os.environ.get("LOOM_BODY_CONVERSATION") or os.environ.get("LOOM_BODY_KEY"))
-    piece_kind = a.cmd in ("request", "use") and a.kind in (VOUCH_KIND, RESET_KIND)
+    piece_kind = a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS
     if body_here and ((a.cmd == "use" and a.kind in OWNER_APPLIED) or piece_kind or a.cmd == "withdraw"):
         # Filed, withdrawn and spent only by the piece that owns it, never from a body the runtime runs on loom's machine
         # as the runtime starts it (LOOM_BODY_CONVERSATION and LOOM_BODY_KEY, its run's key, are in every such body's
@@ -1745,7 +1776,7 @@ def run(argv, caller=None):
         # is the trust boundary (its bodies share the owner's account and have the host's own escapes; in_a_house,
         # below). Houses and the API are refused outright (--as only from loom's machine).
         raise PermissionError(f"a {getattr(a, 'kind', '') or 'piece'}'s card is the piece's to {a.cmd}, not a body's")
-    if a.cmd == "use" and a.kind in (VOUCH_KIND, RESET_KIND) and not a.as_ and not caller:
+    if a.cmd == "use" and a.kind in PIECE_OWNER_KINDS and not a.as_ and not caller:
         # Spent by the piece that applies it, for the agent it was filed for: always said (--as and --on-behalf).
         raise PermissionError(f"a {a.kind} approval is spent by the piece that applies it (--as the agent, --on-behalf owner)")
     if a.cmd == "withdraw":

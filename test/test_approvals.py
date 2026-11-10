@@ -1605,6 +1605,38 @@ class OwnerApplied(unittest.TestCase):
         with self.assertRaises(PermissionError):
             ap.run(["use", aid, "--kind", "principal-reset", "--target", "art:cv-0123456789ab", "--as", self.AS, "--on-behalf", "owner"])
 
+    def test_a_box_write_off_is_the_runtime_s_owner_card_for_one_agent_and_box(self):
+        box = "7f9310-0a1b2c-3d4e5f-6a7b8c"
+        self.assertEqual(ap.writeoff_of(f"art:{box}"), {"agent": "art", "box": box})
+        for bad in ("art:", "art", f"art:{box},x", "Art:one", "art:-one"):
+            self.assertIsNone(ap.writeoff_of(bad), bad)
+        details = f"Box {box}, last heard 2026-11-09T20:00:00Z. Its conversations there: cv-0123456789ab."
+        def file(target=f"art:{box}", d=details, as_=self.AS):
+            return ap.run(["request", "--kind", "box-write-off", "--target", target, "--ask", "The box one has been silent for 12 minutes. Carry on Art's conversation from there on another box?",
+                           "--why", "w", "--if-yes", "y", "--if-no", "n", "--details", d, "--as", as_, "--on-behalf", "owner"]).split(":")[0]
+        with self.assertRaises(PermissionError):
+            file(target=f"ada:{box}")          # only for the agent it's filed for
+        with self.assertRaises(ValueError):
+            file(d="Its conversations: cv-0123456789ab")   # names the box
+        r = ap.api_answer({"caller": HOUSE, "path": "run", "body": {"argv": owned([
+            "request", "--kind", "box-write-off", "--target", f"art:{box}", "--ask", "Move it?", "--why", "w", "--if-yes", "y", "--if-no", "n"])}})
+        self.assertEqual(r["body"]["exit"], 1)
+        self.assertIn("not by a body", r["body"]["stderr"])
+        aid = file()
+        c = self.card(aid)
+        self.assertTrue(c["lead"])
+        self.assertIn("silent for 12 minutes", c["text"])
+        self.assertIn("next box", c["if_yes"])
+        self.assertIn(box, c["fine"])
+        r = ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": {"kind": "owner", "who": "loren", "agents": ["art"]}})
+        self.assertFalse(r["ok"])
+        self.assertTrue(ap.ui_act({"action": "allow", "fields": {"id": aid}, "caller": OWNER_CALLER})["ok"])
+        r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})
+        self.assertEqual(r["body"]["approvals"][aid], {"state": "allowed", "agent": "art", "kind": "box-write-off", "target": f"art:{box}"})
+        with self.assertRaises(PermissionError):
+            ap.run(["use", aid, "--kind", "box-write-off", "--target", f"art:{box}"])   # never without --as
+        self.assertEqual(ap.run(["use", aid, "--kind", "box-write-off", "--target", f"art:{box}", "--as", self.AS, "--on-behalf", "owner"]), f"{aid}: used\n")
+
     def test_state_carries_the_target_for_core(self):
         aid = self.file()
         r = ap.api_answer({"caller": {"kind": "owner"}, "path": "state", "body": {"ids": [aid]}})
