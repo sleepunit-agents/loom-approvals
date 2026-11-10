@@ -1458,6 +1458,9 @@ sys.exit(int(os.environ.get("RT_EXIT", "0")))
             self.assertEqual(ap.principal_for_call({**HOUSE, "house": "-"}, {"agent": "ada"}, "s")["for"], ap.UNKNOWN,
                              "a house named - is never read as no house")
             self.assertEqual(len(self.calls()), n)
+            self.assertEqual(ap.principal_for_call({"kind": "agent", "agent": "ada", "service": "slack"}, {"agent": "ada"}, "s")["for"],
+                             ap.UNKNOWN, "a service's houseless token is no body's (t-2137)")
+            self.assertEqual(len(self.calls()), n)
             self.assertEqual(ap.proven_conversation(HOUSE, {"agent": "ada"}, "cv-0123456789ab", "s"), "cv-0123456789ab")
             self.assertEqual(self.calls()[-1]["argv"], ["--verify", "--house", "h-7"])
         # The runtime's no (its body isn't in that house) is unknown, so the rules ask.
