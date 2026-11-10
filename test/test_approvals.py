@@ -261,8 +261,12 @@ class Approvals(unittest.TestCase):
         # A piece that says on whose behalf (the clock) is held to it: the owner's yes isn't spent for Loren.
         with self.assertRaises(PermissionError):
             ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "loren"])
-        # The runtime's relay can't say (it has no conversation to ask about): everything else is checked.
-        self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)]), f"{aid}: used\n")
+        # A relay spent without saying whom is refused (t-2052): the runtime always says (t-1953), so whom is checked.
+        with self.assertRaises(PermissionError) as e:
+            ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE)])
+        self.assertIn("--on-behalf", str(e.exception))
+        self.assertEqual(ap.get(aid)["state"], "allowed", "a refused spend leaves it allowed")
+        self.assertEqual(ap.run(["use", aid, "--kind", "relay", "--target", "ada->cy", "--as", json.dumps(HOUSE), "--on-behalf", "owner"]), f"{aid}: used\n")
 
     def test_a_piece_may_file_a_request_for_the_body_it_acts_for_locally(self):
         out = ap.run(["request", "--kind", "local-wake", "--target", "ada:abc", "--what", "run X", "--why", "y", "--as", json.dumps(HOUSE)])
@@ -1156,7 +1160,7 @@ class OnWhoseBehalf(unittest.TestCase):
         self.grant("dan", "github:onterris/*", "tell")
         self.assertEqual(self.rule("owner"), "do", "the rules survived a grant edit")
 
-    def test_only_a_relay_is_spent_by_a_piece_without_saying_whom(self):
+    def test_only_a_grant_is_spent_by_a_piece_without_saying_whom(self):
         aid = self.ask_merge("loren")
         ap.ui_act({"action": "allow", "fields": {"id": aid}})
         with self.assertRaises(PermissionError):

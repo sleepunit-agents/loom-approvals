@@ -746,7 +746,8 @@ def spend_card(caller, aid):
 def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=None, unstated=False):
     """Spend an allowed approval for exactly the action it allowed, for the one it was asked for. True once.
     `unstated`: a piece on loom's machine spending for a body (--as) without saying on whose behalf (--on-behalf): the
-    runtime's relay, which has no conversation to ask about. Everything else is checked; whom it was for isn't."""
+    runtime applying a grant, the owner's decision about an agent. Everything else is checked; whom it was for isn't.
+    A relay always says whom (t-2052)."""
     if (kind in PIECE_KINDS or kind in PIECE_SPENT) and not acting_for:
         # Spent by the piece that runs it (the clock sets the wake, the runtime applies a grant), never by a body: a
         # body's own `use` would spend the owner's yes and run nothing.
@@ -2035,6 +2036,10 @@ def run(argv, caller=None):
         # is the trust boundary (its bodies share the owner's account and have the host's own escapes; in_a_house,
         # below). Houses and the API are refused outright (--as only from loom's machine).
         raise PermissionError(f"a {getattr(a, 'kind', '') or 'piece'}'s card is the piece's to {a.cmd}, not a body's")
+    if a.cmd == "use" and a.kind == "relay" and a.as_ and not a.on_behalf:
+        # The runtime's relay says whom it acts for (t-1953: the conversation the caller proved, else "-"), so a relay
+        # spent for a body without saying is refused (t-2052), never spent with whom unchecked.
+        raise PermissionError("a relay approval is spent saying on whose behalf (--as the agent, --on-behalf whom)")
     if a.cmd == "use" and a.kind in PIECE_OWNER_KINDS and not a.as_ and not caller:
         # Spent by the piece that applies it, for the agent it was filed for: always said (--as and --on-behalf).
         raise PermissionError(f"a {a.kind} approval is spent by the piece that applies it (--as the agent, --on-behalf owner)")
@@ -2089,9 +2094,9 @@ def run(argv, caller=None):
     if a.cmd == "use":
         # Over the API (a body) only with no wake kind; on loom's machine (the clock, with or without --as) any.
         use(caller, a.id, a.kind, a.target, acting_for=bool(a.as_) or not caller, statement=statement, on_behalf=a.on_behalf or None,
-            # Only the runtime may leave whom unsaid (t-1953): its relay, and a grant it applies (the owner's own decision
-            # about an agent, whoever the body asked for); any other kind a piece spends says it, or is held to unknown.
-            unstated=bool(a.as_) and not a.on_behalf and a.kind in ("relay", GRANT_KIND))
+            # Only the runtime may leave whom unsaid: a grant it applies (the owner's own decision about an agent, whoever
+            # the body asked for). A relay says it (t-2052, above); any other kind a piece spends says it, or is held to unknown.
+            unstated=bool(a.as_) and not a.on_behalf and a.kind == GRANT_KIND)
         return f"{a.id}: used\n"
     if a.cmd == "rule":
         return rule_answer(caller, a.kind, a.targets, a.for_ or None, a.json, statement=statement)
