@@ -474,10 +474,11 @@ def newest_decision(rows, kind, target, agent):
 
 def deny_siblings(s, kind, target, agent, keep, by=None):
     """A deny stops every earlier yes: each unspent pending or allowed approval for the same kind, target and agent
-    is denied too, and logged."""
+    is denied too, and logged. Except a pending one asked in a conversation: that's its asker's to answer (loom t-2084),
+    and their answer after this one is the newer decision; an allowed one is stopped all the same."""
     for a in s.d["approvals"].values():
         if a["id"] != keep and a["kind"] == kind and a["target"] == target and a["who"].get("agent") == agent \
-                and state_of(a) in ("pending", "allowed"):
+                and (state_of(a) == "allowed" or state_of(a) == "pending" and not a.get("conversation")):
             a["state"], a["decided"], a["superseded_by"] = "denied", iso(now()), keep
             a.pop("expires", None)
             if by:

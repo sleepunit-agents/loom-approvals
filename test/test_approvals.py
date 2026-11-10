@@ -548,6 +548,11 @@ class Rules(unittest.TestCase):
         self.assertNotIn(aid, out)
         self.assertEqual({a["id"]: a["state"] for a in ap.recent()}[aid], "pending")
         self.assertEqual(len(ap.recent()), 2)
+        # Nor does a Not yet answer it; it stops the earlier yes all the same.
+        out = ap.run(["grant", "--kind", "merge", "--target", T, "--for", "ada", "--by", "jonathan-barket", "--deny"])
+        states = {a["id"]: a["state"] for a in ap.recent()}
+        self.assertEqual(states[aid], "pending")
+        self.assertNotIn("allowed", states.values())
 
     def test_grant_is_refused_over_the_api_and_for_anything_but_a_merge_target(self):
         self.assertEqual(self.api(["grant", "--kind", "merge", "--target", T, "--for", "ada"])["exit"], 1)
