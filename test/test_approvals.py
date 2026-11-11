@@ -2353,5 +2353,83 @@ class HostSteps(unittest.TestCase):
         self.assertEqual(self.api(["request", "--kind", "host", "--target", "shell:ls", "--what", "x", "--why", "y"])["exit"], 1)
 
 
+class ProfileGrants(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(ap, "STATE", Path(self.td.name)); self.p.start()
+        self.target = "runtime-job-profile:" + "a" * 64
+        self.argv = ["request", "--json", "--kind", "grant", "--target", self.target,
+                     "--as", json.dumps({"kind": "agent", "agent": "ada"}), "--on-behalf", "owner",
+                     "--ask", "Allow this job to read files?", "--why", "It needs the files to finish its work.",
+                     "--if-yes", "I add reading to this job profile.", "--if-no", "I keep this job unchanged.",
+                     "--details", "Job: a test job; capability: tools Read; revision: a fixture"]
+    def tearDown(self):
+        self.p.stop(); self.td.cleanup()
+    def ask(self):
+        return json.loads(ap.run(self.argv))
+    def test_real_store_deduplicates_pending_aged_and_denied(self):
+        a = self.ask(); self.assertEqual(self.ask()["id"], a["id"])
+        with self.assertRaises(PermissionError): ap.withdraw(HOUSE,a["id"],acting_for=False,statement="S:ada:owner")
+        self.assertEqual(ap.get(a["id"])["state"],"pending")
+        with ap.Store() as store:
+            store.d["approvals"][a["id"]]["at"] = "2000-01-01T00:00:00Z"; store.save()
+        self.assertEqual(self.ask()["id"], a["id"])
+        ap.ui_act({"action": "deny", "fields": {"id": a["id"]}, "caller": OWNER_CALLER})
+        self.assertEqual(self.ask()["state"], "denied")
+        with mock.patch.object(ap, "KEEP", 1):
+            other = [x.replace("a" * 64, "b" * 64) for x in self.argv]
+            ap.run(other)
+            with ap.Store() as store:
+                for row in store.d["approvals"].values():
+                    if row["id"] != a["id"]: row["at"] = "2099-01-01T00:00:00Z"
+                store.save()
+            self.assertEqual(self.ask()["state"], "denied")
+        with ap.Store() as store: self.assertEqual(len(store.d["approvals"]), 2)
+    def test_body_cannot_file_spend_or_answer_and_trusted_allow_replays(self):
+        args = [x for x in self.argv]
+        i = args.index("--as"); del args[i:i+2]
+        with self.assertRaises(PermissionError): ap.run(args, HOUSE)
+        with mock.patch.dict(os.environ, {"LOOM_BODY_CONVERSATION": "cv-0123456789ab"}):
+            with self.assertRaises(PermissionError): ap.run(self.argv)
+        a = self.ask()
+        self.assertFalse(ap.ui_act({"action": "allow", "fields": {"id": a["id"]}, "caller": MEMBER_CALLER})["ok"])
+        self.assertTrue(ap.ui_act({"action": "allow", "fields": {"id": a["id"]}, "caller": OWNER_CALLER})["ok"])
+        with ap.Store() as store:
+            store.d["approvals"][a["id"]]["expires"] = "2000-01-01T00:00:00Z"; store.save()
+        self.assertEqual(self.ask()["id"], a["id"])
+        self.assertEqual(ap.state_of(ap.get(a["id"])), "allowed")
+        use = ["use", a["id"], "--kind", "grant", "--target", self.target]
+        with self.assertRaises(PermissionError): ap.run(use, HOUSE)
+        trusted = use + ["--as", json.dumps({"kind": "agent", "agent": "ada"})]
+        self.assertEqual(ap.run(trusted), f"{a['id']}: used\n")
+        self.assertEqual(ap.run(trusted), f"{a['id']}: used\n")
+        self.assertEqual(self.ask()["id"], a["id"])
+        with self.assertRaises(PermissionError): ap.run([x.replace("a" * 64, "b" * 64) for x in trusted])
+
+    def test_allowed_and_used_decisions_survive_retention_and_reopen(self):
+        a=self.ask(); ap.ui_act({"action":"allow","fields":{"id":a["id"]},"caller":OWNER_CALLER})
+        for used in (False,True):
+            if used:
+                ap.run(["use",a["id"],"--kind","grant","--target",self.target,"--as",json.dumps({"kind":"agent","agent":"ada"})])
+            with mock.patch.object(ap,"KEEP",0):
+                with ap.Store() as store: store.save()
+            self.assertEqual(self.ask()["id"],a["id"])
+            self.assertEqual(ap.get(a["id"])["state"],"used" if used else "allowed")
+        with self.assertRaises(PermissionError):
+            ap.run(["use",a["id"],"--kind","grant","--target",self.target,"--as",json.dumps({"kind":"agent","agent":"other"})])
+    def test_store_syncs_file_then_rename_then_parent_and_keeps_prior_on_failure(self):
+        path=Path(self.td.name)/"proof.json"; path.write_text('{"prior":true}')
+        events=[]; real_fsync=os.fsync; real_replace=Path.replace
+        def fsync(fd):
+            import stat
+            events.append("dir-sync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file-sync"); return real_fsync(fd)
+        def replace(src,dst): events.append("rename"); return real_replace(src,dst)
+        with mock.patch.object(os,"fsync",side_effect=fsync), mock.patch.object(Path,"replace",replace): ap.Store.write_json(path,{"next":True})
+        self.assertEqual(events,["file-sync","rename","dir-sync"])
+        with mock.patch.object(Path,"replace",side_effect=RuntimeError("interrupted before rename")):
+            with self.assertRaises(RuntimeError): ap.Store.write_json(path,{"lost":True})
+        self.assertEqual(json.loads(path.read_text()),{"next":True})
+
+
 if __name__ == "__main__":
     unittest.main()

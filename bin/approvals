@@ -163,6 +163,11 @@ PIECE_KINDS = {"local-wake", "vouch-wake", "principal-reset", "box-write-off"}
 # runtime on loom's machine spends it (--as the agent that asked), in the same step that applies it. And only the
 # household owner answers it: an agent's owner (a member) can't give an agent a piece of the household's.
 GRANT_KIND = "grant"
+PROFILE_TARGET = re.compile(r"runtime-job-profile:[0-9a-f]{64}")
+
+def profile_target(target):
+    return bool(PROFILE_TARGET.fullmatch(str(target or "")))
+
 GRANT_NAME = r"[a-z][a-z0-9-]{0,39}"
 
 # Owner-only actions that used to need him at a terminal on loom's machine (t-1975, Jonathan 2026-11-08: "It needs to
@@ -384,7 +389,7 @@ class Store:
     def save(self):
         rows = sorted(self.d["approvals"].values(), key=lambda a: a["at"], reverse=True)
         # The owner's No to a vouch or a reset is kept past KEEP (t-1975): it's what stops him being asked again.
-        kept = rows[:KEEP] + [a for a in rows[KEEP:] if a["kind"] in (VOUCH_KIND, RESET_KIND) and a["state"] == "denied"]
+        kept = rows[:KEEP] + [a for a in rows[KEEP:] if (a["kind"] in (VOUCH_KIND, RESET_KIND) and a["state"] == "denied") or (a["kind"] == GRANT_KIND and profile_target(a["target"]))]
         self.d["approvals"] = {a["id"]: a for a in kept}
         self.write_json(self.path, self.d)
 
@@ -455,7 +460,14 @@ class Store:
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
         with os.fdopen(os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as f:
             f.write(json.dumps(obj, indent=1) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         tmp.replace(path)
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
 
     def log(self, event, a, **extra):
         with os.fdopen(os.open(self.audit, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600), "a") as f:
@@ -488,7 +500,7 @@ def deny_siblings(s, kind, target, agent, keep, by=None):
 
 def state_of(a, t=None):
     t = t or now()
-    if a["state"] == "allowed" and a.get("expires") and datetime.strptime(a["expires"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) <= t:
+    if not (a.get("kind") == GRANT_KIND and profile_target(a.get("target"))) and a["state"] == "allowed" and a.get("expires") and datetime.strptime(a["expires"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) <= t:
         return "expired"
     return a["state"]
 
@@ -709,7 +721,12 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
         tier = rules_for(who["agent"], kind, [target], p["for"])[target]["tier"]
         if tier in ("do", "tell"):
             raise PermissionError(f"the standing rule for {target} is {tier}: the runtime runs it without a card; no card was filed")
-    if kind == GRANT_KIND and not grant_of(target):
+    if kind == GRANT_KIND and profile_target(target):
+        if not acting_for or p["for"] != OWNER:
+            raise PermissionError("a job profile grant is filed by the runtime for an authenticated owner job")
+        if not ask or not details:
+            raise ValueError("a job profile grant names the job and capability in its ask and details")
+    if kind == GRANT_KIND and not grant_of(target) and not profile_target(target):
         raise ValueError("a grant target is <piece>:<agent>, or <piece>:<agent>:<path>,<path> for only those paths "
                          "(a path, or a prefix ending in /*): tasks:mark")
     if kind == VOUCH_KIND and not vouch_of(target):
@@ -781,6 +798,13 @@ def request(caller, kind, target, what, why, minutes=None, acting_for=False, ask
                     raise PermissionError(f"{a['id']} already asks about {' '.join(both)}: withdraw it first (withdraw {a['id']})")
                 if both and state_of(a) == "allowed":
                     raise PermissionError(f"the owner allowed {a['id']} for {' '.join(both)}: apply it (it's spent by the piece) before asking again")
+        if kind == GRANT_KIND and profile_target(target):
+            # Revision-bound targets are permanent answers, including Deny and
+            # used Allow. Expiry must not make another card for the same need.
+            prior = [a for a in s.d["approvals"].values() if a["kind"] == kind and a["target"] == target
+                     and a["who"].get("agent") == who["agent"] and same_principal(a, p)]
+            if prior:
+                return max(prior, key=lambda a: a["at"])
         # Asking again for the same thing is the same card, from any of the agent's bodies (use's rule): a parked body's
         # continuation asks from a later house, and a second card would ask the owner twice for one thing.
         last = newest_decision(s.d["approvals"].values(), kind, target, who["agent"])
@@ -862,7 +886,8 @@ def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=N
             s.log("refused-use", a, who_used=who)
             raise PermissionError(f"{aid} isn't {who['agent']}'s to spend from here")
         st = state_of(a)
-        if st != "allowed":
+        replay = st == "used" and kind == GRANT_KIND and profile_target(target) and acting_for
+        if st != "allowed" and not replay:
             raise PermissionError(f"{aid} is {st}" + (", waiting on the owner" if st == "pending" else ""))
         if a["kind"] != kind or a["target"] != target:
             s.log("refused-use", a, kind_used=kind, target_used=target)
@@ -884,6 +909,8 @@ def use(caller, aid, kind, target, acting_for=False, statement=None, on_behalf=N
         if last and last["id"] != aid and last["state"] == "denied" and last["decided"] > a.get("decided", ""):
             s.log("refused-use", a, denied_by=last["id"])
             raise PermissionError(f"{aid} was overruled: the owner said no to {target} after ({last['id']})")
+        if replay:
+            return a
         a["state"], a["used"] = "used", iso(now())
         s.save()
         s.log("use", a)
@@ -906,6 +933,8 @@ def withdraw(caller, aid, acting_for=True, statement=None):
         a = s.d["approvals"].get(aid)
         if not a:
             raise LookupError(f"no approval {aid}")
+        if a["kind"] == GRANT_KIND and profile_target(a["target"]):
+            raise PermissionError("a job profile card stays for the owner to Allow or Deny; it cannot be withdrawn")
         if acting_for:
             if a["kind"] not in PIECE_KINDS or a["who"].get("agent") != who["agent"]:
                 raise PermissionError(f"{aid} isn't one {who['agent']}'s piece filed")
@@ -1663,6 +1692,8 @@ def ask_detail(a):
 
 def fine_print(a):
     """Exactly what Allow allows: the kind and target (machine fields), where it was asked from, for whom, for how long."""
+    if a.get("kind") == GRANT_KIND and profile_target(a.get("target")):
+        return "A permanent capability for this job only. The runtime applies your Allow to the exact profile revision shown above. A Deny keeps it unchanged and is not asked again."
     if a.get("kind") == GRANT_KIND and grant_of(a.get("target")):
         g = grant_of(a["target"])
         # Short whatever the target (loom refuses a card's fine print past 400, and with it every card): the paths are
@@ -2239,6 +2270,7 @@ def run(argv, caller=None):
     r = sub.add_parser("request", add_help=False, exit_on_error=False)
     for f in ("--kind", "--target", "--what", "--why", "--minutes", "--ask", "--details", "--conversation", "--digest"):
         r.add_argument(f, default="")
+    r.add_argument("--json", action="store_true")
     r.add_argument("--if-yes", dest="if_yes", default="")
     r.add_argument("--if-no", dest="if_no", default="")
     r.add_argument("--as", dest="as_", default="")
@@ -2290,7 +2322,7 @@ def run(argv, caller=None):
     body_here = bool(os.environ.get("LOOM_BODY_CONVERSATION") or os.environ.get("LOOM_BODY_KEY"))
     # A local wake's card is the clock's too (t-2013): Allow every time makes it standing, so a body on loom's machine
     # never files one in its own words, or for whom it likes.
-    piece_kind = (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
+    piece_kind = (a.cmd == "request" and a.kind == GRANT_KIND and profile_target(a.target)) or (a.cmd in ("request", "use") and a.kind in PIECE_OWNER_KINDS) or (a.cmd == "request" and a.kind == STANDING_KIND)
     if body_here and ((a.cmd == "use" and a.kind in PIECE_SPENT) or piece_kind or a.cmd == "standing"
                       or (a.cmd in ("rule", "tell") and a.as_)
                       or (a.cmd == "withdraw" and a.as_ is not None)):
@@ -2335,6 +2367,8 @@ def run(argv, caller=None):
                     acting_for=bool(a.as_), ask=a.ask or None, if_yes=a.if_yes or None, if_no=a.if_no or None,
                     details=a.details or None, conversation=a.conversation or None, statement=statement,
                     on_behalf=a.on_behalf or None, digest=a.digest or None)
+        if a.json:
+            return json.dumps(x) + "\n"
         if x["state"] == "denied":
             return f"{x['id']}: the owner said not yet for this exact change and head; a new push asks again\n"
         if x["state"] == "allowed" and x["kind"] == GRANT_KIND:
