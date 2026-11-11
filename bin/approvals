@@ -373,6 +373,14 @@ def plain(text, n):
 class Store:
     def __init__(self):
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Sync each new directory entry (including mkdir races) before a card can
+        # be acknowledged. Syncing only STATE cannot publish STATE in its parent.
+        for directory in (STATE.resolve(), *STATE.resolve().parents):
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         os.chmod(STATE, 0o700)  # mkdir's mode only applies to a directory it makes
         self.path, self.audit = STATE / "approvals.json", STATE / "audit.jsonl"
 

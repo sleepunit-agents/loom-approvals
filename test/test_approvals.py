@@ -2417,6 +2417,22 @@ class ProfileGrants(unittest.TestCase):
             self.assertEqual(ap.get(a["id"])["state"],"used" if used else "allowed")
         with self.assertRaises(PermissionError):
             ap.run(["use",a["id"],"--kind","grant","--target",self.target,"--as",json.dumps({"kind":"agent","agent":"other"})])
+    def test_first_store_directory_ancestors_are_durable_before_publication(self):
+        state = Path(self.td.name) / "new-parent" / "new-state"
+        synced = set(); real_fsync = os.fsync
+        def fsync(fd):
+            st = os.fstat(fd); synced.add((st.st_dev, st.st_ino)); return real_fsync(fd)
+        with mock.patch.object(ap, "STATE", state), mock.patch.object(os, "fsync", side_effect=fsync):
+            ap.Store()
+        for directory in (state.resolve(), *state.resolve().parents):
+            st = directory.stat(); self.assertIn((st.st_dev, st.st_ino), synced)
+        # A failed ancestor sync must not acknowledge/publish a new card.
+        failed = Path(self.td.name) / "failed-parent" / "failed-state"
+        with mock.patch.object(ap, "STATE", failed), mock.patch.object(os, "fsync", side_effect=OSError("sync failed")):
+            with self.assertRaises(OSError):
+                with ap.Store() as store: store.save()
+        self.assertFalse((failed / "approvals.json").exists())
+
     def test_store_syncs_file_then_rename_then_parent_and_keeps_prior_on_failure(self):
         path=Path(self.td.name)/"proof.json"; path.write_text('{"prior":true}')
         events=[]; real_fsync=os.fsync; real_replace=Path.replace
