@@ -113,6 +113,23 @@ class Approvals(unittest.TestCase):
         self.assertEqual(len(asks), 13)
         self.assertEqual(ids[:10], [f"a-{n:08x}" for n in range(22, 12, -1)], "newest first")
 
+    def test_another_agents_cards_do_not_consume_an_unthreaded_group(self):
+        first = self.ask("acme/app:eligible")
+        base = ap.get(first)
+        with ap.Store() as store:
+            store.d["approvals"] = {
+                f"a-{n:08x}": {**base, "id": f"a-{n:08x}", "target": f"acme/app:{n}",
+                               "who": {**base["who"], "agent": "bo" if n == 1 else "ada"},
+                               "at": f"2026-11-12T10:{n:02d}:00Z"}
+                for n in range(1, 15)
+            }
+            store.save()
+        asks = ap.ui_manifest()["asks"]
+        self.assertEqual(len(asks), 11)
+        self.assertEqual(asks[-1]["agent"], "bo")
+        self.assertEqual(asks[-1]["actions"][0]["fields"]["id"], "a-00000001")
+        self.assertTrue(all(not a.get("conversation") for a in asks))
+
     def test_ask_allow_once_use_once(self):
         aid = self.ask()
         self.assertEqual(self.ask(), aid, "asking again is the same card")
