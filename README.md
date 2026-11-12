@@ -386,3 +386,18 @@ second spend and a wrong target, the API, the page.
 ## License
 
 AGPL-3.0-or-later, like loom and its other pieces. See [LICENSE](LICENSE).
+
+### Runtime job profile grants
+
+The reserved `grant` target `runtime-job-profile:<sha256>` is filed only by the
+runtime on loom's machine (`--as`, `--on-behalf owner`), after proving the current
+job. A body cannot file or spend it. The runtime retains the exact canonical
+amendment; this piece retains one owner answer for each revision-bound target,
+including Deny. These decisions do not expire into another request. On Allow,
+core's existing owner grant callback invokes the runtime executor, which spends
+and applies the stored amendment. That trusted spend alone is idempotent for
+this namespace, so a crash before the profile write can retry safely. Ordinary
+piece-access and merge approvals retain their single-use behavior.
+
+Requires the matching runtime adapter in sleepunit-agents/loom-box#217. Ship the
+adapters together; neither grants an agent access to the approvals piece.
