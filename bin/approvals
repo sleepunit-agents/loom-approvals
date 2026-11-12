@@ -1700,9 +1700,27 @@ def fine_print(a):
     return once
 
 
+def pending_candidates(rows):
+    """Core chooses ten AFTER checking the viewer. Keep ten per visibility-equivalent group here, in recency order:
+    an agent, a conversation (or none), and whether only household owners may answer it. Never truncate globally:
+    another member's private backlog must not consume this member's candidates. Core's manifest count/byte limits
+    still bound the answer; an over-limit answer is refused whole, never silently narrowed to other people's cards.
+    """
+    counts, out = {}, []
+    for a in rows:
+        if a["state"] != "pending":
+            continue
+        group = (a["who"]["agent"], a.get("conversation"), bool(owner_lines(a)))
+        n = counts.get(group, 0)
+        if n < 10:
+            out.append(a)
+            counts[group] = n + 1
+    return out
+
+
 def ui_manifest():
     rows = recent()
-    pending = [a for a in rows if a["state"] == "pending"][:10]
+    pending = pending_candidates(rows)
     # loom's Inbox: what's waiting is a permission; what was answered is its history (Answered).
     done = [a for a in rows if a["state"] in OUTCOME][:20]
     # The tab makes the page real: without it loom serves no /p/approvals, and the asks' and answered rows' links led

@@ -88,6 +88,48 @@ class Approvals(unittest.TestCase):
         self.assertEqual(r["body"]["exit"], 0, r)
         return r["body"]["stdout"].split(":")[0]
 
+    def test_pending_candidates_keep_each_visibility_group_without_global_truncation(self):
+        first = self.ask("acme/app:eligible")
+        base = ap.get(first)
+        def row(n, **extra):
+            return {**base, "id": f"a-{n:08x}", "target": f"acme/app:{n}",
+                    "at": f"2026-11-12T10:{n:02d}:00Z", **extra}
+        # Old eligible cards must survive newer private ones, even from the same agent.
+        with ap.Store() as store:
+            store.d["approvals"] = {a["id"]: a for a in [
+                row(1, conversation="cv-000000000001"),
+                row(2, conversation="cv-000000000002", kind="grant", target="tasks:ada"),
+                row(3, who={**base["who"], "agent": "bo"}),
+                *[row(n, conversation="cv-000000000002") for n in range(10, 23)],
+            ]}
+            store.save()
+        asks = ap.ui_manifest()["asks"]
+        ids = [a["actions"][0]["fields"]["id"] for a in asks]
+        self.assertIn("a-00000001", ids)
+        self.assertIn("a-00000002", ids, "a household-only lead is a separate visibility group")
+        self.assertIn("a-00000003", ids, "another agent's approvals never use this agent's quota")
+        private = [a for a in asks if a.get("conversation") == "cv-000000000002" and not a.get("lead")]
+        self.assertEqual(len(private), 10)
+        self.assertEqual(len(asks), 13)
+        self.assertEqual(ids[:10], [f"a-{n:08x}" for n in range(22, 12, -1)], "newest first")
+
+    def test_another_agents_cards_do_not_consume_an_unthreaded_group(self):
+        first = self.ask("acme/app:eligible")
+        base = ap.get(first)
+        with ap.Store() as store:
+            store.d["approvals"] = {
+                f"a-{n:08x}": {**base, "id": f"a-{n:08x}", "target": f"acme/app:{n}",
+                               "who": {**base["who"], "agent": "bo" if n == 1 else "ada"},
+                               "at": f"2026-11-12T10:{n:02d}:00Z"}
+                for n in range(1, 15)
+            }
+            store.save()
+        asks = ap.ui_manifest()["asks"]
+        self.assertEqual(len(asks), 11)
+        self.assertEqual(asks[-1]["agent"], "bo")
+        self.assertEqual(asks[-1]["actions"][0]["fields"]["id"], "a-00000001")
+        self.assertTrue(all(not a.get("conversation") for a in asks))
+
     def test_ask_allow_once_use_once(self):
         aid = self.ask()
         self.assertEqual(self.ask(), aid, "asking again is the same card")
