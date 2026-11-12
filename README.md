@@ -324,7 +324,11 @@ finds its piece home from where it's installed and reads the owner's
 
 - **The page.** `ui --json` puts each pending approval under "Your call" on
   loom's Home (an Inbox `permission`, with *Allow once* and *Deny*) and the
-  answered ones in its history, each linking to the piece's page. The manifest's
+  answered ones in its history, each linking to the piece's page. Pending candidates are the newest ten per
+  agent, conversation (or none), and household-only lead status, in overall recency order. Core must accept
+  those candidates and filter by member before choosing ten to show (t-2128); install the matching core fix
+  before this piece update. The existing core limits (1000 candidates, 512 KiB) refuse an oversized manifest
+  whole; the piece never silently drops one member's group to keep another's. The manifest's
   `tab` (`Approvals`, under Setup, its tile a `stamp`) is what makes that page exist at
   `/p/approvals`. `ui page --json` is an app page: what's waiting first, each a
   row whose sheet holds *Allow once* and *Deny*; then what was answered, each
